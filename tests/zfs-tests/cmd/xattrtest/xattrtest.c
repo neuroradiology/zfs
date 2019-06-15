@@ -37,7 +37,7 @@
 #include <fcntl.h>
 #include <time.h>
 #include <unistd.h>
-#include <attr/xattr.h>
+#include <sys/xattr.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <sys/stat.h>
@@ -98,31 +98,32 @@ static char script[PATH_MAX] = "/bin/true";
 static char xattrbytes[XATTR_SIZE_MAX];
 
 static int
-usage(int argc, char **argv) {
+usage(int argc, char **argv)
+{
 	fprintf(stderr,
-	"usage: %s [-hvycdrRk] [-n <nth>] [-f <files>] [-x <xattrs>]\n"
-	"       [-s <bytes>] [-p <path>] [-t <script> ] [-o <phase>]\n",
-	argv[0]);
+	    "usage: %s [-hvycdrRk] [-n <nth>] [-f <files>] [-x <xattrs>]\n"
+	    "       [-s <bytes>] [-p <path>] [-t <script> ] [-o <phase>]\n",
+	    argv[0]);
 
 	fprintf(stderr,
-	"  --help        -h           This help\n"
-	"  --verbose     -v           Increase verbosity\n"
-	"  --verify      -y           Verify xattr contents\n"
-	"  --nth         -n <nth>     Print every nth file\n"
-	"  --files       -f <files>   Set xattrs on N files\n"
-	"  --xattrs      -x <xattrs>  Set N xattrs on each file\n"
-	"  --size        -s <bytes>   Set N bytes per xattr\n"
-	"  --path        -p <path>    Path to files\n"
-	"  --synccaches  -c           Sync caches between phases\n"
-	"  --dropcaches  -d           Drop caches between phases\n"
-	"  --script      -t <script>  Exec script between phases\n"
-	"  --seed        -e <seed>    Random seed value\n"
-	"  --random      -r           Randomly sized xattrs [16-size]\n"
-	"  --randomvalue -R           Random xattr values\n"
-	"  --keep        -k           Don't unlink files\n"
-	"  --only        -o <num>     Only run phase N\n"
-	"                             0=all, 1=create, 2=setxattr,\n"
-	"                             3=getxattr, 4=unlink\n\n");
+	    "  --help        -h           This help\n"
+	    "  --verbose     -v           Increase verbosity\n"
+	    "  --verify      -y           Verify xattr contents\n"
+	    "  --nth         -n <nth>     Print every nth file\n"
+	    "  --files       -f <files>   Set xattrs on N files\n"
+	    "  --xattrs      -x <xattrs>  Set N xattrs on each file\n"
+	    "  --size        -s <bytes>   Set N bytes per xattr\n"
+	    "  --path        -p <path>    Path to files\n"
+	    "  --synccaches  -c           Sync caches between phases\n"
+	    "  --dropcaches  -d           Drop caches between phases\n"
+	    "  --script      -t <script>  Exec script between phases\n"
+	    "  --seed        -e <seed>    Random seed value\n"
+	    "  --random      -r           Randomly sized xattrs [16-size]\n"
+	    "  --randomvalue -R           Random xattr values\n"
+	    "  --keep        -k           Don't unlink files\n"
+	    "  --only        -o <num>     Only run phase N\n"
+	    "                             0=all, 1=create, 2=setxattr,\n"
+	    "                             3=getxattr, 4=unlink\n\n");
 
 	return (1);
 }
@@ -143,11 +144,6 @@ parse_args(int argc, char **argv)
 			break;
 		case 'y':
 			verify = 1;
-			if (phase != PHASE_ALL) {
-				fprintf(stderr,
-				    "Error: -y and -o are incompatible.\n");
-				rc = 1;
-			}
 			break;
 		case 'n':
 			nth = strtol(optarg, NULL, 0);
@@ -168,6 +164,7 @@ parse_args(int argc, char **argv)
 			break;
 		case 'p':
 			strncpy(path, optarg, PATH_MAX);
+			path[PATH_MAX - 1] = '\0';
 			break;
 		case 'c':
 			synccaches = 1;
@@ -177,6 +174,7 @@ parse_args(int argc, char **argv)
 			break;
 		case 't':
 			strncpy(script, optarg, PATH_MAX);
+			script[PATH_MAX - 1] = '\0';
 			break;
 		case 'e':
 			seed = strtol(optarg, NULL, 0);
@@ -196,11 +194,6 @@ parse_args(int argc, char **argv)
 				fprintf(stderr, "Error: the -o value must be "
 				    "greater than %d and less than %d\n",
 				    PHASE_ALL, PHASE_INVAL);
-				rc = 1;
-			}
-			if (verify == 1) {
-				fprintf(stderr,
-				    "Error: -y and -o are incompatible.\n");
 				rc = 1;
 			}
 			break;
@@ -252,6 +245,7 @@ drop_caches(void)
 	rc = write(fd, "3", 1);
 	if ((rc == -1) || (rc != 1)) {
 		ERROR("Error %d: write(%d, \"3\", 1)\n", errno, fd);
+		(void) close(fd);
 		return (errno);
 	}
 
@@ -286,7 +280,8 @@ run_process(const char *path, char *argv[])
 	} else if (pid > 0) {
 		int status;
 
-		while ((rc = waitpid(pid, &status, 0)) == -1 && errno == EINTR);
+		while ((rc = waitpid(pid, &status, 0)) == -1 &&
+		    errno == EINTR) { }
 
 		if (rc < 0 || !WIFEXITED(status))
 			return (-1);
@@ -362,19 +357,25 @@ create_files(void)
 	char *file = NULL;
 	struct timeval start, stop;
 	double seconds;
+	size_t fsize;
 
-	file = malloc(PATH_MAX);
+	fsize = PATH_MAX;
+	file = malloc(fsize);
 	if (file == NULL) {
 		rc = ENOMEM;
-		ERROR("Error %d: malloc(%d) bytes for file name\n",
-			rc, PATH_MAX);
+		ERROR("Error %d: malloc(%d) bytes for file name\n", rc,
+		    PATH_MAX);
 		goto out;
 	}
 
 	(void) gettimeofday(&start, NULL);
 
 	for (i = 1; i <= files; i++) {
-		(void) sprintf(file, "%s/file-%d", path, i);
+		if (snprintf(file, fsize, "%s/file-%d", path, i) >= fsize) {
+			rc = EINVAL;
+			ERROR("Error %d: path too long\n", rc);
+			goto out;
+		}
 
 		if (nth && ((i % nth) == 0))
 			fprintf(stdout, "create: %s\n", file);
@@ -389,7 +390,7 @@ create_files(void)
 		rc = open(file, O_CREAT, 0644);
 		if (rc == -1) {
 			ERROR("Error %d: open(%s, O_CREATE, 0644)\n",
-				errno, file);
+			    errno, file);
 			rc = errno;
 			goto out;
 		}
@@ -447,27 +448,33 @@ setxattrs(void)
 	char *file = NULL;
 	struct timeval start, stop;
 	double seconds;
+	size_t fsize;
 
 	value = malloc(XATTR_SIZE_MAX);
 	if (value == NULL) {
 		rc = ENOMEM;
-		ERROR("Error %d: malloc(%d) bytes for xattr value\n",
-			rc, XATTR_SIZE_MAX);
+		ERROR("Error %d: malloc(%d) bytes for xattr value\n", rc,
+		    XATTR_SIZE_MAX);
 		goto out;
 	}
 
-	file = malloc(PATH_MAX);
+	fsize = PATH_MAX;
+	file = malloc(fsize);
 	if (file == NULL) {
 		rc = ENOMEM;
-		ERROR("Error %d: malloc(%d) bytes for file name\n",
-			rc, PATH_MAX);
+		ERROR("Error %d: malloc(%d) bytes for file name\n", rc,
+		    PATH_MAX);
 		goto out;
 	}
 
 	(void) gettimeofday(&start, NULL);
 
 	for (i = 1; i <= files; i++) {
-		(void) sprintf(file, "%s/file-%d", path, i);
+		if (snprintf(file, fsize, "%s/file-%d", path, i) >= fsize) {
+			rc = EINVAL;
+			ERROR("Error %d: path too long\n", rc);
+			goto out;
+		}
 
 		if (nth && ((i % nth) == 0))
 			fprintf(stdout, "setxattr: %s\n", file);
@@ -518,38 +525,45 @@ getxattrs(void)
 	char *file = NULL;
 	struct timeval start, stop;
 	double seconds;
+	size_t fsize;
 
 	verify_value = malloc(XATTR_SIZE_MAX);
 	if (verify_value == NULL) {
 		rc = ENOMEM;
-		ERROR("Error %d: malloc(%d) bytes for xattr verify\n",
-			rc, XATTR_SIZE_MAX);
+		ERROR("Error %d: malloc(%d) bytes for xattr verify\n", rc,
+		    XATTR_SIZE_MAX);
 		goto out;
 	}
 
 	value = malloc(XATTR_SIZE_MAX);
 	if (value == NULL) {
 		rc = ENOMEM;
-		ERROR("Error %d: malloc(%d) bytes for xattr value\n",
-			rc, XATTR_SIZE_MAX);
+		ERROR("Error %d: malloc(%d) bytes for xattr value\n", rc,
+		    XATTR_SIZE_MAX);
 		goto out;
 	}
 
 	verify_string = value_is_random ? "<random>" : verify_value;
 	value_string = value_is_random ? "<random>" : value;
 
-	file = malloc(PATH_MAX);
+	fsize = PATH_MAX;
+	file = malloc(fsize);
+
 	if (file == NULL) {
 		rc = ENOMEM;
-		ERROR("Error %d: malloc(%d) bytes for file name\n",
-			rc, PATH_MAX);
+		ERROR("Error %d: malloc(%d) bytes for file name\n", rc,
+		    PATH_MAX);
 		goto out;
 	}
 
 	(void) gettimeofday(&start, NULL);
 
 	for (i = 1; i <= files; i++) {
-		(void) sprintf(file, "%s/file-%d", path, i);
+		if (snprintf(file, fsize, "%s/file-%d", path, i) >= fsize) {
+			rc = EINVAL;
+			ERROR("Error %d: path too long\n", rc);
+			goto out;
+		}
 
 		if (nth && ((i % nth) == 0))
 			fprintf(stdout, "getxattr: %s\n", file);
@@ -610,8 +624,10 @@ unlink_files(void)
 	char *file = NULL;
 	struct timeval start, stop;
 	double seconds;
+	size_t fsize;
 
-	file = malloc(PATH_MAX);
+	fsize = PATH_MAX;
+	file = malloc(fsize);
 	if (file == NULL) {
 		rc = ENOMEM;
 		ERROR("Error %d: malloc(%d) bytes for file name\n",
@@ -622,7 +638,11 @@ unlink_files(void)
 	(void) gettimeofday(&start, NULL);
 
 	for (i = 1; i <= files; i++) {
-		(void) sprintf(file, "%s/file-%d", path, i);
+		if (snprintf(file, fsize, "%s/file-%d", path, i) >= fsize) {
+			rc = EINVAL;
+			ERROR("Error %d: path too long\n", rc);
+			goto out;
+		}
 
 		if (nth && ((i % nth) == 0))
 			fprintf(stdout, "unlink: %s\n", file);
@@ -630,6 +650,7 @@ unlink_files(void)
 		rc = unlink(file);
 		if ((rc == -1) && (errno != ENOENT)) {
 			ERROR("Error %d: unlink(%s)\n", errno, file);
+			free(file);
 			return (errno);
 		}
 	}

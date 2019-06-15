@@ -20,7 +20,7 @@
  */
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2016 by Delphix. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -28,13 +28,19 @@
 #include <sys/spa_impl.h>
 #include <sys/vdev_file.h>
 #include <sys/vdev_impl.h>
+#include <sys/vdev_trim.h>
 #include <sys/zio.h>
 #include <sys/fs/zfs.h>
 #include <sys/fm/fs/zfs.h>
+#include <sys/abd.h>
+#include <sys/fcntl.h>
+#include <sys/vnode.h>
 
 /*
  * Virtual device vector for files.
  */
+
+static taskq_t *vdev_file_taskq;
 
 static void
 vdev_file_hold(vdev_t *vd)
@@ -57,8 +63,23 @@ vdev_file_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	vattr_t vattr;
 	int error;
 
-	/* Rotational optimizations only make sense on block devices */
+	/*
+	 * Rotational optimizations only make sense on block devices.
+	 */
 	vd->vdev_nonrot = B_TRUE;
+
+	/*
+	 * Allow TRIM on file based vdevs.  This may not always be supported,
+	 * since it depends on your kernel version and underlying filesystem
+	 * type but it is always safe to attempt.
+	 */
+	vd->vdev_has_trim = B_TRUE;
+
+	/*
+	 * Disable secure TRIM on file based vdevs.  There is no way to
+	 * request this behavior from the underlying filesystem.
+	 */
+	vd->vdev_has_securetrim = B_FALSE;
 
 	/*
 	 * We must have a pathname, and it must be absolute.
@@ -150,11 +171,21 @@ vdev_file_io_strategy(void *arg)
 	vdev_t *vd = zio->io_vd;
 	vdev_file_t *vf = vd->vdev_tsd;
 	ssize_t resid;
+	void *buf;
+
+	if (zio->io_type == ZIO_TYPE_READ)
+		buf = abd_borrow_buf(zio->io_abd, zio->io_size);
+	else
+		buf = abd_borrow_buf_copy(zio->io_abd, zio->io_size);
 
 	zio->io_error = vn_rdwr(zio->io_type == ZIO_TYPE_READ ?
-	    UIO_READ : UIO_WRITE, vf->vf_vnode, zio->io_data,
-	    zio->io_size, zio->io_offset, UIO_SYSSPACE,
-	    0, RLIM64_INFINITY, kcred, &resid);
+	    UIO_READ : UIO_WRITE, vf->vf_vnode, buf, zio->io_size,
+	    zio->io_offset, UIO_SYSSPACE, 0, RLIM64_INFINITY, kcred, &resid);
+
+	if (zio->io_type == ZIO_TYPE_READ)
+		abd_return_buf_copy(zio->io_abd, buf, zio->io_size);
+	else
+		abd_return_buf(zio->io_abd, buf, zio->io_size);
 
 	if (resid != 0 && zio->io_error == 0)
 		zio->io_error = SET_ERROR(ENOSPC);
@@ -200,9 +231,10 @@ vdev_file_io_start(zio_t *zio)
 			 * already set, see xfs_vm_writepage().  Therefore
 			 * the sync must be dispatched to a different context.
 			 */
-			if (spl_fstrans_check()) {
-				VERIFY3U(taskq_dispatch(system_taskq,
-				    vdev_file_io_fsync, zio, TQ_SLEEP), !=, 0);
+			if (__spl_pf_fstrans_check()) {
+				VERIFY3U(taskq_dispatch(vdev_file_taskq,
+				    vdev_file_io_fsync, zio, TQ_SLEEP), !=,
+				    TASKQID_INVALID);
 				return;
 			}
 
@@ -215,12 +247,27 @@ vdev_file_io_start(zio_t *zio)
 
 		zio_execute(zio);
 		return;
+	} else if (zio->io_type == ZIO_TYPE_TRIM) {
+		struct flock flck;
+
+		ASSERT3U(zio->io_size, !=, 0);
+		bzero(&flck, sizeof (flck));
+		flck.l_type = F_FREESP;
+		flck.l_start = zio->io_offset;
+		flck.l_len = zio->io_size;
+		flck.l_whence = SEEK_SET;
+
+		zio->io_error = VOP_SPACE(vf->vf_vnode, F_FREESP, &flck,
+		    0, 0, kcred, NULL);
+
+		zio_execute(zio);
+		return;
 	}
 
 	zio->io_target_timestamp = zio_handle_io_delay(zio);
 
-	VERIFY3U(taskq_dispatch(system_taskq, vdev_file_io_strategy, zio,
-	    TQ_SLEEP), !=, 0);
+	VERIFY3U(taskq_dispatch(vdev_file_taskq, vdev_file_io_strategy, zio,
+	    TQ_SLEEP), !=, TASKQID_INVALID);
 }
 
 /* ARGSUSED */
@@ -236,11 +283,29 @@ vdev_ops_t vdev_file_ops = {
 	vdev_file_io_start,
 	vdev_file_io_done,
 	NULL,
+	NULL,
 	vdev_file_hold,
 	vdev_file_rele,
+	NULL,
+	vdev_default_xlate,
 	VDEV_TYPE_FILE,		/* name of this vdev type */
 	B_TRUE			/* leaf vdev */
 };
+
+void
+vdev_file_init(void)
+{
+	vdev_file_taskq = taskq_create("z_vdev_file", MAX(boot_ncpus, 16),
+	    minclsyspri, boot_ncpus, INT_MAX, TASKQ_DYNAMIC);
+
+	VERIFY(vdev_file_taskq);
+}
+
+void
+vdev_file_fini(void)
+{
+	taskq_destroy(vdev_file_taskq);
+}
 
 /*
  * From userland we access disks just like files.
@@ -254,8 +319,11 @@ vdev_ops_t vdev_disk_ops = {
 	vdev_file_io_start,
 	vdev_file_io_done,
 	NULL,
+	NULL,
 	vdev_file_hold,
 	vdev_file_rele,
+	NULL,
+	vdev_default_xlate,
 	VDEV_TYPE_DISK,		/* name of this vdev type */
 	B_TRUE			/* leaf vdev */
 };

@@ -21,6 +21,7 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2012, 2015 by Delphix. All rights reserved.
+ * Copyright (c) 2017, Intel Corporation.
  */
 
 /*
@@ -35,12 +36,15 @@
  *
  * Errors can be injected into a particular vdev using the '-d' option.  This
  * option takes a path or vdev GUID to uniquely identify the device within a
- * pool.  There are two types of errors that can be injected, EIO and ENXIO,
- * that can be controlled through the '-e' option.  The default is ENXIO.  For
- * EIO failures, any attempt to read data from the device will return EIO, but
- * subsequent attempt to reopen the device will succeed.  For ENXIO failures,
- * any attempt to read from the device will return EIO, but any attempt to
- * reopen the device will also return ENXIO.
+ * pool.  There are four types of errors that can be injected, IO, ENXIO,
+ * ECHILD, and EILSEQ.  These can be controlled through the '-e' option and the
+ * default is ENXIO.  For EIO failures, any attempt to read data from the device
+ * will return EIO, but a subsequent attempt to reopen the device will succeed.
+ * For ENXIO failures, any attempt to read from the device will return EIO, but
+ * any attempt to reopen the device will also return ENXIO.  The EILSEQ failures
+ * only apply to read operations (-T read) and will flip a bit after the device
+ * has read the original data.
+ *
  * For label faults, the -L option must be specified. This allows faults
  * to be injected into either the nvlist, uberblock, pad1, or pad2 region
  * of all the labels for the specified device.
@@ -112,9 +116,9 @@
  * specified.
  *
  * The '-e' option takes a string describing the errno to simulate.  This must
- * be either 'io' or 'checksum'.  In most cases this will result in the same
- * behavior, but RAID-Z will produce a different set of ereports for this
- * situation.
+ * be one of 'io', 'checksum', 'decompress', or 'decrypt'.  In most cases this
+ * will result in the same behavior, but RAID-Z will produce a different set of
+ * ereports for this situation.
  *
  * The '-a', '-u', and '-m' flags toggle internal flush behavior.  If '-a' is
  * specified, then the ARC cache is flushed appropriately.  If '-u' is
@@ -124,7 +128,7 @@
  * cache.
  *
  * The '-f' flag controls the frequency of errors injected, expressed as a
- * integer percentage between 1 and 100.  The default is 100.
+ * real number percentage between 0.0001 and 100.  The default is 100.
  *
  * The this form is responsible for actually injecting the handler into the
  * framework.  It takes the arguments described above, translates them to the
@@ -230,11 +234,14 @@ usage(void)
 	    "\t\tspa_vdev_exit() will trigger a panic.\n"
 	    "\n"
 	    "\tzinject -d device [-e errno] [-L <nvlist|uber|pad1|pad2>] [-F]\n"
-	    "\t    [-T <read|write|free|claim|all> pool\n"
+	    "\t\t[-T <read|write|free|claim|all>] [-f frequency] pool\n\n"
 	    "\t\tInject a fault into a particular device or the device's\n"
 	    "\t\tlabel.  Label injection can either be 'nvlist', 'uber',\n "
 	    "\t\t'pad1', or 'pad2'.\n"
-	    "\t\t'errno' can be 'nxio' (the default), 'io', or 'dtl'.\n"
+	    "\t\t'errno' can be 'nxio' (the default), 'io', 'dtl', or\n"
+	    "\t\t'corrupt' (bit flip).\n"
+	    "\t\t'frequency' is a value between 0.0001 and 100.0 that limits\n"
+	    "\t\tdevice error injection to a percentage of the IOs.\n"
 	    "\n"
 	    "\tzinject -d device -A <degrade|fault> -D <delay secs> pool\n"
 	    "\t\tPerform a specific action on a particular device.\n"
@@ -282,18 +289,21 @@ usage(void)
 	    "\n"
 	    "\t\tInject an error into pool 'pool' with the numeric bookmark\n"
 	    "\t\tspecified by the remaining tuple.  Each number is in\n"
-	    "\t\thexidecimal, and only one block can be specified.\n"
+	    "\t\thexadecimal, and only one block can be specified.\n"
 	    "\n"
-	    "\tzinject [-q] <-t type> [-e errno] [-l level] [-r range]\n"
-	    "\t    [-a] [-m] [-u] [-f freq] <object>\n"
+	    "\tzinject [-q] <-t type> [-C dvas] [-e errno] [-l level]\n"
+	    "\t\t[-r range] [-a] [-m] [-u] [-f freq] <object>\n"
 	    "\n"
 	    "\t\tInject an error into the object specified by the '-t' option\n"
 	    "\t\tand the object descriptor.  The 'object' parameter is\n"
 	    "\t\tinterpreted depending on the '-t' option.\n"
 	    "\n"
 	    "\t\t-q\tQuiet mode.  Only print out the handler number added.\n"
-	    "\t\t-e\tInject a specific error.  Must be either 'io' or\n"
-	    "\t\t\t'checksum'.  Default is 'io'.\n"
+	    "\t\t-e\tInject a specific error.  Must be one of 'io',\n"
+	    "\t\t\t'checksum', 'decompress', or 'decrypt'.  Default is 'io'.\n"
+	    "\t\t-C\tInject the given error only into specific DVAs. The\n"
+	    "\t\t\tDVAs should be specified as a list of 0-indexed DVAs\n"
+	    "\t\t\tseparated by commas (ex. '0,2').\n"
 	    "\t\t-l\tInject error at a particular block level. Default is "
 	    "0.\n"
 	    "\t\t-m\tAutomatically remount underlying filesystem.\n"
@@ -305,7 +315,7 @@ usage(void)
 	    "\t\t-u\tUnload the associated pool.  Can be specified with only\n"
 	    "\t\t\ta pool object.\n"
 	    "\t\t-f\tOnly inject errors a fraction of the time.  Expressed as\n"
-	    "\t\t\ta percentage between 1 and 100.\n"
+	    "\t\t\ta percentage between 0.0001 and 100.\n"
 	    "\n"
 	    "\t-t data\t\tInject an error into the plain file contents of a\n"
 	    "\t\t\tfile.  The object must be specified as a complete path\n"
@@ -354,17 +364,20 @@ print_data_handler(int id, const char *pool, zinject_record_t *record,
 		return (0);
 
 	if (*count == 0) {
-		(void) printf("%3s  %-15s  %-6s  %-6s  %-8s  %3s  %-15s\n",
-		    "ID", "POOL", "OBJSET", "OBJECT", "TYPE", "LVL",  "RANGE");
+		(void) printf("%3s  %-15s  %-6s  %-6s  %-8s  %3s  %-4s  "
+		    "%-15s\n", "ID", "POOL", "OBJSET", "OBJECT", "TYPE",
+		    "LVL", "DVAs", "RANGE");
 		(void) printf("---  ---------------  ------  "
-		    "------  --------  ---  ---------------\n");
+		    "------  --------  ---  ----  ---------------\n");
 	}
 
 	*count += 1;
 
-	(void) printf("%3d  %-15s  %-6llu  %-6llu  %-8s  %3d  ", id, pool,
-	    (u_longlong_t)record->zi_objset, (u_longlong_t)record->zi_object,
-	    type_to_name(record->zi_type), record->zi_level);
+	(void) printf("%3d  %-15s  %-6llu  %-6llu  %-8s  %-3d  0x%02x  ",
+	    id, pool, (u_longlong_t)record->zi_objset,
+	    (u_longlong_t)record->zi_object, type_to_name(record->zi_type),
+	    record->zi_level, record->zi_dvas);
+
 
 	if (record->zi_start == 0 &&
 	    record->zi_end == -1ULL)
@@ -548,12 +561,13 @@ register_handler(const char *pool, int flags, zinject_record_t *record,
 {
 	zfs_cmd_t zc = {"\0"};
 
-	(void) strcpy(zc.zc_name, pool);
+	(void) strlcpy(zc.zc_name, pool, sizeof (zc.zc_name));
 	zc.zc_inject_record = *record;
 	zc.zc_guid = flags;
 
 	if (ioctl(zfs_fd, ZFS_IOC_INJECT_FAULT, &zc) != 0) {
 		(void) fprintf(stderr, "failed to add handler: %s\n",
+		    errno == EDOM ? "block level exceeds max level of object" :
 		    strerror(errno));
 		return (1);
 	}
@@ -594,6 +608,7 @@ register_handler(const char *pool, int flags, zinject_record_t *record,
 				(void) printf(" range: [%llu, %llu)\n",
 				    (u_longlong_t)record->zi_start,
 				    (u_longlong_t)record->zi_end);
+			(void) printf("  dvas: 0x%x\n", record->zi_dvas);
 		}
 	}
 
@@ -645,6 +660,80 @@ parse_delay(char *str, uint64_t *delay, uint64_t *nlanes)
 	return (0);
 }
 
+static int
+parse_frequency(const char *str, uint32_t *percent)
+{
+	double val;
+	char *post;
+
+	val = strtod(str, &post);
+	if (post == NULL || *post != '\0')
+		return (EINVAL);
+
+	/* valid range is [0.0001, 100.0] */
+	val /= 100.0f;
+	if (val < 0.000001f || val > 1.0f)
+		return (ERANGE);
+
+	/* convert to an integer for use by kernel */
+	*percent = ((uint32_t)(val * ZI_PERCENTAGE_MAX));
+
+	return (0);
+}
+
+/*
+ * This function converts a string specifier for DVAs into a bit mask.
+ * The dva's provided by the user should be 0 indexed and separated by
+ * a comma. For example:
+ *	"1"	-> 0b0010  (0x2)
+ *	"0,1"	-> 0b0011  (0x3)
+ *	"0,1,2"	-> 0b0111  (0x7)
+ */
+static int
+parse_dvas(const char *str, uint32_t *dvas_out)
+{
+	const char *c = str;
+	uint32_t mask = 0;
+	boolean_t need_delim = B_FALSE;
+
+	/* max string length is 5 ("0,1,2") */
+	if (strlen(str) > 5 || strlen(str) == 0)
+		return (EINVAL);
+
+	while (*c != '\0') {
+		switch (*c) {
+		case '0':
+		case '1':
+		case '2':
+			/* check for pipe between DVAs */
+			if (need_delim)
+				return (EINVAL);
+
+			/* check if this DVA has been set already */
+			if (mask & (1 << ((*c) - '0')))
+				return (EINVAL);
+
+			mask |= (1 << ((*c) - '0'));
+			need_delim = B_TRUE;
+			break;
+		case ',':
+			need_delim = B_FALSE;
+			break;
+		default:
+			/* check for invalid character */
+			return (EINVAL);
+		}
+		c++;
+	}
+
+	/* check for dangling delimiter */
+	if (!need_delim)
+		return (EINVAL);
+
+	*dvas_out = mask;
+	return (0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -663,14 +752,15 @@ main(int argc, char **argv)
 	err_type_t type = TYPE_INVAL;
 	err_type_t label = TYPE_INVAL;
 	zinject_record_t record = { 0 };
-	char pool[MAXNAMELEN];
-	char dataset[MAXNAMELEN];
+	char pool[MAXNAMELEN] = "";
+	char dataset[MAXNAMELEN] = "";
 	zfs_handle_t *zhp = NULL;
 	int nowrites = 0;
 	int dur_txg = 0;
 	int dur_secs = 0;
 	int ret;
 	int flags = 0;
+	uint32_t dvas = 0;
 
 	if ((g_zfs = libzfs_init()) == NULL) {
 		(void) fprintf(stderr, "%s", libzfs_error_init(errno));
@@ -681,6 +771,7 @@ main(int argc, char **argv)
 
 	if ((zfs_fd = open(ZFS_DEV, O_RDWR)) < 0) {
 		(void) fprintf(stderr, "failed to open ZFS device\n");
+		libzfs_fini(g_zfs);
 		return (1);
 	}
 
@@ -695,12 +786,12 @@ main(int argc, char **argv)
 			(void) printf("Run 'zinject -h' for usage "
 			    "information.\n");
 		}
-
+		libzfs_fini(g_zfs);
 		return (0);
 	}
 
 	while ((c = getopt(argc, argv,
-	    ":aA:b:d:D:f:Fg:qhIc:t:T:l:mr:s:e:uL:p:")) != -1) {
+	    ":aA:b:C:d:D:f:Fg:qhIc:t:T:l:mr:s:e:uL:p:")) != -1) {
 		switch (c) {
 		case 'a':
 			flags |= ZINJECT_FLUSH_ARC;
@@ -714,6 +805,7 @@ main(int argc, char **argv)
 				(void) fprintf(stderr, "invalid action '%s': "
 				    "must be 'degrade' or 'fault'\n", optarg);
 				usage();
+				libzfs_fini(g_zfs);
 				return (1);
 			}
 			break;
@@ -722,6 +814,17 @@ main(int argc, char **argv)
 			break;
 		case 'c':
 			cancel = optarg;
+			break;
+		case 'C':
+			ret = parse_dvas(optarg, &dvas);
+			if (ret != 0) {
+				(void) fprintf(stderr, "invalid DVA list '%s': "
+				    "DVAs should be 0 indexed and separated by "
+				    "commas.\n", optarg);
+				usage();
+				libzfs_fini(g_zfs);
+				return (1);
+			}
 			break;
 		case 'd':
 			device = optarg;
@@ -735,6 +838,7 @@ main(int argc, char **argv)
 				(void) fprintf(stderr, "invalid i/o delay "
 				    "value: '%s'\n", optarg);
 				usage();
+				libzfs_fini(g_zfs);
 				return (1);
 			}
 			break;
@@ -743,23 +847,33 @@ main(int argc, char **argv)
 				error = EIO;
 			} else if (strcasecmp(optarg, "checksum") == 0) {
 				error = ECKSUM;
+			} else if (strcasecmp(optarg, "decompress") == 0) {
+				error = EINVAL;
+			} else if (strcasecmp(optarg, "decrypt") == 0) {
+				error = EACCES;
 			} else if (strcasecmp(optarg, "nxio") == 0) {
 				error = ENXIO;
 			} else if (strcasecmp(optarg, "dtl") == 0) {
 				error = ECHILD;
+			} else if (strcasecmp(optarg, "corrupt") == 0) {
+				error = EILSEQ;
 			} else {
 				(void) fprintf(stderr, "invalid error type "
 				    "'%s': must be 'io', 'checksum' or "
 				    "'nxio'\n", optarg);
 				usage();
+				libzfs_fini(g_zfs);
 				return (1);
 			}
 			break;
 		case 'f':
-			record.zi_freq = atoi(optarg);
-			if (record.zi_freq < 1 || record.zi_freq > 100) {
-				(void) fprintf(stderr, "frequency range must "
-				    "be in the range (0, 100]\n");
+			ret = parse_frequency(optarg, &record.zi_freq);
+			if (ret != 0) {
+				(void) fprintf(stderr, "%sfrequency value must "
+				    "be in the range [0.0001, 100.0]\n",
+				    ret == EINVAL ? "invalid value: " :
+				    ret == ERANGE ? "out of range: " : "");
+				libzfs_fini(g_zfs);
 				return (1);
 			}
 			break;
@@ -773,6 +887,7 @@ main(int argc, char **argv)
 				(void) fprintf(stderr, "invalid duration '%s': "
 				    "must be a positive integer\n", optarg);
 				usage();
+				libzfs_fini(g_zfs);
 				return (1);
 			}
 			/* store duration of txgs as its negative */
@@ -780,6 +895,7 @@ main(int argc, char **argv)
 			break;
 		case 'h':
 			usage();
+			libzfs_fini(g_zfs);
 			return (0);
 		case 'I':
 			/* default duration, if one hasn't yet been defined */
@@ -793,6 +909,7 @@ main(int argc, char **argv)
 				(void) fprintf(stderr, "invalid level '%s': "
 				    "must be an integer\n", optarg);
 				usage();
+				libzfs_fini(g_zfs);
 				return (1);
 			}
 			break;
@@ -809,6 +926,7 @@ main(int argc, char **argv)
 			break;
 		case 'r':
 			range = optarg;
+			flags |= ZINJECT_CALC_RANGE;
 			break;
 		case 's':
 			dur_secs = 1;
@@ -817,6 +935,7 @@ main(int argc, char **argv)
 				(void) fprintf(stderr, "invalid duration '%s': "
 				    "must be a positive integer\n", optarg);
 				usage();
+				libzfs_fini(g_zfs);
 				return (1);
 			}
 			break;
@@ -836,6 +955,7 @@ main(int argc, char **argv)
 				    "'%s': must be 'read', 'write', 'free', "
 				    "'claim' or 'all'\n", optarg);
 				usage();
+				libzfs_fini(g_zfs);
 				return (1);
 			}
 			break;
@@ -845,6 +965,7 @@ main(int argc, char **argv)
 				(void) fprintf(stderr, "invalid type '%s'\n",
 				    optarg);
 				usage();
+				libzfs_fini(g_zfs);
 				return (1);
 			}
 			break;
@@ -857,6 +978,7 @@ main(int argc, char **argv)
 				(void) fprintf(stderr, "invalid label type "
 				    "'%s'\n", optarg);
 				usage();
+				libzfs_fini(g_zfs);
 				return (1);
 			}
 			break;
@@ -864,11 +986,13 @@ main(int argc, char **argv)
 			(void) fprintf(stderr, "option -%c requires an "
 			    "operand\n", optopt);
 			usage();
+			libzfs_fini(g_zfs);
 			return (1);
 		case '?':
 			(void) fprintf(stderr, "invalid option '%c'\n",
 			    optopt);
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 	}
@@ -884,15 +1008,18 @@ main(int argc, char **argv)
 		 * '-c' is invalid with any other options.
 		 */
 		if (raw != NULL || range != NULL || type != TYPE_INVAL ||
-		    level != 0 || record.zi_cmd != ZINJECT_UNINITIALIZED) {
+		    level != 0 || record.zi_cmd != ZINJECT_UNINITIALIZED ||
+		    record.zi_freq > 0 || dvas != 0) {
 			(void) fprintf(stderr, "cancel (-c) incompatible with "
 			    "any other options\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 		if (argc != 0) {
 			(void) fprintf(stderr, "extraneous argument to '-c'\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 
@@ -904,6 +1031,7 @@ main(int argc, char **argv)
 				(void) fprintf(stderr, "invalid handle id '%s':"
 				    " must be an integer or 'all'\n", cancel);
 				usage();
+				libzfs_fini(g_zfs);
 				return (1);
 			}
 			return (cancel_handler(id));
@@ -916,10 +1044,12 @@ main(int argc, char **argv)
 		 * for doing injection, so handle it separately here.
 		 */
 		if (raw != NULL || range != NULL || type != TYPE_INVAL ||
-		    level != 0 || record.zi_cmd != ZINJECT_UNINITIALIZED) {
+		    level != 0 || record.zi_cmd != ZINJECT_UNINITIALIZED ||
+		    dvas != 0) {
 			(void) fprintf(stderr, "device (-d) incompatible with "
 			    "data error injection\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 
@@ -927,21 +1057,33 @@ main(int argc, char **argv)
 			(void) fprintf(stderr, "device (-d) injection requires "
 			    "a single pool name\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 
-		(void) strcpy(pool, argv[0]);
+		(void) strlcpy(pool, argv[0], sizeof (pool));
 		dataset[0] = '\0';
 
 		if (error == ECKSUM) {
 			(void) fprintf(stderr, "device error type must be "
-			    "'io' or 'nxio'\n");
+			    "'io', 'nxio' or 'corrupt'\n");
+			libzfs_fini(g_zfs);
+			return (1);
+		}
+
+		if (error == EILSEQ &&
+		    (record.zi_freq == 0 || io_type != ZIO_TYPE_READ)) {
+			(void) fprintf(stderr, "device corrupt errors require "
+			    "io type read and a frequency value\n");
+			libzfs_fini(g_zfs);
 			return (1);
 		}
 
 		record.zi_iotype = io_type;
-		if (translate_device(pool, device, label, &record) != 0)
+		if (translate_device(pool, device, label, &record) != 0) {
+			libzfs_fini(g_zfs);
 			return (1);
+		}
 		if (!error)
 			error = ENXIO;
 
@@ -950,10 +1092,12 @@ main(int argc, char **argv)
 
 	} else if (raw != NULL) {
 		if (range != NULL || type != TYPE_INVAL || level != 0 ||
-		    record.zi_cmd != ZINJECT_UNINITIALIZED) {
+		    record.zi_cmd != ZINJECT_UNINITIALIZED ||
+		    record.zi_freq > 0 || dvas != 0) {
 			(void) fprintf(stderr, "raw (-b) format with "
 			    "any other options\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 
@@ -961,29 +1105,35 @@ main(int argc, char **argv)
 			(void) fprintf(stderr, "raw (-b) format expects a "
 			    "single pool name\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 
-		(void) strcpy(pool, argv[0]);
+		(void) strlcpy(pool, argv[0], sizeof (pool));
 		dataset[0] = '\0';
 
 		if (error == ENXIO) {
 			(void) fprintf(stderr, "data error type must be "
 			    "'checksum' or 'io'\n");
+			libzfs_fini(g_zfs);
 			return (1);
 		}
 
 		record.zi_cmd = ZINJECT_DATA_FAULT;
-		if (translate_raw(raw, &record) != 0)
+		if (translate_raw(raw, &record) != 0) {
+			libzfs_fini(g_zfs);
 			return (1);
+		}
 		if (!error)
 			error = EIO;
 	} else if (record.zi_cmd == ZINJECT_PANIC) {
 		if (raw != NULL || range != NULL || type != TYPE_INVAL ||
-		    level != 0 || device != NULL) {
+		    level != 0 || device != NULL || record.zi_freq > 0 ||
+		    dvas != 0) {
 			(void) fprintf(stderr, "panic (-p) incompatible with "
 			    "other options\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 
@@ -991,33 +1141,46 @@ main(int argc, char **argv)
 			(void) fprintf(stderr, "panic (-p) injection requires "
 			    "a single pool name and an optional id\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 
-		(void) strcpy(pool, argv[0]);
+		(void) strlcpy(pool, argv[0], sizeof (pool));
 		if (argv[1] != NULL)
 			record.zi_type = atoi(argv[1]);
 		dataset[0] = '\0';
 	} else if (record.zi_cmd == ZINJECT_IGNORED_WRITES) {
+		if (raw != NULL || range != NULL || type != TYPE_INVAL ||
+		    level != 0 || record.zi_freq > 0 || dvas != 0) {
+			(void) fprintf(stderr, "hardware failure (-I) "
+			    "incompatible with other options\n");
+			usage();
+			libzfs_fini(g_zfs);
+			return (2);
+		}
+
 		if (nowrites == 0) {
 			(void) fprintf(stderr, "-s or -g meaningless "
 			    "without -I (ignore writes)\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		} else if (dur_secs && dur_txg) {
 			(void) fprintf(stderr, "choose a duration either "
 			    "in seconds (-s) or a number of txgs (-g) "
 			    "but not both\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		} else if (argc != 1) {
 			(void) fprintf(stderr, "ignore writes (-I) "
 			    "injection requires a single pool name\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 
-		(void) strcpy(pool, argv[0]);
+		(void) strlcpy(pool, argv[0], sizeof (pool));
 		dataset[0] = '\0';
 	} else if (type == TYPE_INVAL) {
 		if (flags == 0) {
@@ -1025,16 +1188,18 @@ main(int argc, char **argv)
 			    "'-t', '-a', '-p', '-I' or '-u' "
 			    "must be specified\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 
 		if (argc == 1 && (flags & ZINJECT_UNLOAD_SPA)) {
-			(void) strcpy(pool, argv[0]);
+			(void) strlcpy(pool, argv[0], sizeof (pool));
 			dataset[0] = '\0';
 		} else if (argc != 0) {
 			(void) fprintf(stderr, "extraneous argument for "
 			    "'-f'\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 
@@ -1043,19 +1208,53 @@ main(int argc, char **argv)
 		if (argc != 1) {
 			(void) fprintf(stderr, "missing object\n");
 			usage();
+			libzfs_fini(g_zfs);
 			return (2);
 		}
 
-		if (error == ENXIO) {
+		if (error == ENXIO || error == EILSEQ) {
 			(void) fprintf(stderr, "data error type must be "
 			    "'checksum' or 'io'\n");
+			libzfs_fini(g_zfs);
 			return (1);
 		}
 
-		record.zi_cmd = ZINJECT_DATA_FAULT;
+		if (dvas != 0) {
+			if (error == EACCES || error == EINVAL) {
+				(void) fprintf(stderr, "the '-C' option may "
+				    "not be used with logical data errors "
+				    "'decrypt' and 'decompress'\n");
+				libzfs_fini(g_zfs);
+				return (1);
+			}
+
+			record.zi_dvas = dvas;
+		}
+
+		if (error == EACCES) {
+			if (type != TYPE_DATA) {
+				(void) fprintf(stderr, "decryption errors "
+				    "may only be injected for 'data' types\n");
+				libzfs_fini(g_zfs);
+				return (1);
+			}
+
+			record.zi_cmd = ZINJECT_DECRYPT_FAULT;
+			/*
+			 * Internally, ZFS actually uses ECKSUM for decryption
+			 * errors since EACCES is used to indicate the key was
+			 * not found.
+			 */
+			error = ECKSUM;
+		} else {
+			record.zi_cmd = ZINJECT_DATA_FAULT;
+		}
+
 		if (translate_record(type, argv[0], range, level, &record, pool,
-		    dataset) != 0)
+		    dataset) != 0) {
+			libzfs_fini(g_zfs);
 			return (1);
+		}
 		if (!error)
 			error = EIO;
 	}
@@ -1066,10 +1265,15 @@ main(int argc, char **argv)
 	 * time we access the pool.
 	 */
 	if (dataset[0] != '\0' && domount) {
-		if ((zhp = zfs_open(g_zfs, dataset, ZFS_TYPE_DATASET)) == NULL)
+		if ((zhp = zfs_open(g_zfs, dataset,
+		    ZFS_TYPE_DATASET)) == NULL) {
+			libzfs_fini(g_zfs);
 			return (1);
-		if (zfs_unmount(zhp, NULL, 0) != 0)
+		}
+		if (zfs_unmount(zhp, NULL, 0) != 0) {
+			libzfs_fini(g_zfs);
 			return (1);
+		}
 	}
 
 	record.zi_error = error;

@@ -496,7 +496,7 @@ kcf_resubmit_request(kcf_areq_node_t *areq)
 	kcf_provider_desc_t *new_pd;
 	crypto_mechanism_t *mech1 = NULL, *mech2 = NULL;
 	crypto_mech_type_t prov_mt1, prov_mt2;
-	crypto_func_group_t fg;
+	crypto_func_group_t fg = 0;
 
 	if (!can_resubmit(areq, &mech1, &mech2, &fg))
 		return (error);
@@ -561,7 +561,7 @@ kcf_resubmit_request(kcf_areq_node_t *areq)
 		taskq_t *taskq = new_pd->pd_sched_info.ks_taskq;
 
 		if (taskq_dispatch(taskq, process_req_hwp, areq, TQ_NOSLEEP) ==
-		    (taskqid_t)0) {
+		    TASKQID_INVALID) {
 			error = CRYPTO_HOST_MEMORY;
 		} else {
 			error = CRYPTO_QUEUED;
@@ -782,7 +782,7 @@ kcf_submit_request(kcf_provider_desc_t *pd, crypto_ctx_t *ctx,
 
 			if (taskq_dispatch(taskq,
 			    process_req_hwp, areq, TQ_NOSLEEP) ==
-			    (taskqid_t)0) {
+			    TASKQID_INVALID) {
 				error = CRYPTO_HOST_MEMORY;
 				if (!(crq->cr_flag & CRYPTO_SKIP_REQID))
 					kcf_reqid_delete(areq);
@@ -1056,17 +1056,28 @@ kcf_sched_destroy(void)
 	if (kcf_misc_kstat)
 		kstat_delete(kcf_misc_kstat);
 
-	if (kcfpool)
-		kmem_free(kcfpool, sizeof (kcf_pool_t));
+	if (kcfpool) {
+		mutex_destroy(&kcfpool->kp_thread_lock);
+		cv_destroy(&kcfpool->kp_nothr_cv);
+		mutex_destroy(&kcfpool->kp_user_lock);
+		cv_destroy(&kcfpool->kp_user_cv);
 
-	for (i = 0; i < REQID_TABLES; i++) {
-		if (kcf_reqid_table[i])
-			kmem_free(kcf_reqid_table[i],
-				sizeof (kcf_reqid_table_t));
+		kmem_free(kcfpool, sizeof (kcf_pool_t));
 	}
 
-	if (gswq)
+	for (i = 0; i < REQID_TABLES; i++) {
+		if (kcf_reqid_table[i]) {
+			mutex_destroy(&(kcf_reqid_table[i]->rt_lock));
+			kmem_free(kcf_reqid_table[i],
+			    sizeof (kcf_reqid_table_t));
+		}
+	}
+
+	if (gswq) {
+		mutex_destroy(&gswq->gs_lock);
+		cv_destroy(&gswq->gs_cv);
 		kmem_free(gswq, sizeof (kcf_global_swq_t));
+	}
 
 	if (kcf_context_cache)
 		kmem_cache_destroy(kcf_context_cache);
@@ -1074,6 +1085,9 @@ kcf_sched_destroy(void)
 		kmem_cache_destroy(kcf_areq_cache);
 	if (kcf_sreq_cache)
 		kmem_cache_destroy(kcf_sreq_cache);
+
+	mutex_destroy(&ntfy_list_lock);
+	cv_destroy(&ntfy_list_cv);
 }
 
 /*
@@ -1292,8 +1306,11 @@ kcf_reqid_insert(kcf_areq_node_t *areq)
 	int indx;
 	crypto_req_id_t id;
 	kcf_areq_node_t *headp;
-	kcf_reqid_table_t *rt =
-	    kcf_reqid_table[CPU_SEQID & REQID_TABLE_MASK];
+	kcf_reqid_table_t *rt;
+
+	kpreempt_disable();
+	rt = kcf_reqid_table[CPU_SEQID & REQID_TABLE_MASK];
+	kpreempt_enable();
 
 	mutex_enter(&rt->rt_lock);
 
@@ -1740,8 +1757,10 @@ kcf_last_req(void *last_req_arg, int status)
 		ct = (crypto_dual_data_t *)dcrops->dop_ciphertext;
 		break;
 	}
-	default:
-		break;
+	default: {
+		panic("invalid kcf_op_group_t %d", (int)params->rp_opgrp);
+		return;
+	}
 	}
 	ct->dd_offset1 = last_req->kr_saveoffset;
 	ct->dd_len1 = last_req->kr_savelen;

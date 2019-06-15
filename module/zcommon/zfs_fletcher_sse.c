@@ -2,7 +2,7 @@
  * Implement fast Fletcher4 with SSE2,SSSE3 instructions. (x86)
  *
  * Use the 128-bit SSE2/SSSE3 SIMD instructions and registers to compute
- * Fletcher4 in four incremental 64-bit parallel accumulator streams,
+ * Fletcher4 in two incremental 64-bit parallel accumulator streams,
  * and then combine the streams to form the final four checksum words.
  * This implementation is a derivative of the AVX SIMD implementation by
  * James Guilford and Jinshan Xiong from Intel (see zfs_fletcher_intel.c).
@@ -45,38 +45,20 @@
 
 #include <linux/simd_x86.h>
 #include <sys/spa_checksum.h>
+#include <sys/byteorder.h>
+#include <sys/strings.h>
 #include <zfs_fletcher.h>
 
-struct zfs_fletcher_sse_array {
-	uint64_t v[2] __attribute__((aligned(16)));
-};
-
 static void
-fletcher_4_sse2_init(zio_cksum_t *zcp)
+fletcher_4_sse2_init(fletcher_4_ctx_t *ctx)
 {
-	kfpu_begin();
-
-	/* clear sse registers */
-	asm volatile("pxor %xmm0, %xmm0");
-	asm volatile("pxor %xmm1, %xmm1");
-	asm volatile("pxor %xmm2, %xmm2");
-	asm volatile("pxor %xmm3, %xmm3");
+	bzero(ctx->sse, 4 * sizeof (zfs_fletcher_sse_t));
 }
 
 static void
-fletcher_4_sse2_fini(zio_cksum_t *zcp)
+fletcher_4_sse2_fini(fletcher_4_ctx_t *ctx, zio_cksum_t *zcp)
 {
-	struct zfs_fletcher_sse_array a, b, c, d;
 	uint64_t A, B, C, D;
-
-	asm volatile("movdqu %%xmm0, %0":"=m" (a.v));
-	asm volatile("movdqu %%xmm1, %0":"=m" (b.v));
-	asm volatile("psllq $0x2, %xmm2");
-	asm volatile("movdqu %%xmm2, %0":"=m" (c.v));
-	asm volatile("psllq $0x3, %xmm3");
-	asm volatile("movdqu %%xmm3, %0":"=m" (d.v));
-
-	kfpu_end();
 
 	/*
 	 * The mixing matrix for checksum calculation is:
@@ -88,19 +70,41 @@ fletcher_4_sse2_fini(zio_cksum_t *zcp)
 	 * c and d are multiplied by 4 and 8, respectively,
 	 * before spilling the vectors out to memory.
 	 */
-	A = a.v[0] + a.v[1];
-	B = 2*b.v[0] + 2*b.v[1] - a.v[1];
-	C = c.v[0] - b.v[0] + c.v[1] - 3*b.v[1];
-	D = d.v[0] - c.v[0] + d.v[1] - 2*c.v[1] + b.v[1];
+	A = ctx->sse[0].v[0] + ctx->sse[0].v[1];
+	B = 2 * ctx->sse[1].v[0] + 2 * ctx->sse[1].v[1] - ctx->sse[0].v[1];
+	C = 4 * ctx->sse[2].v[0] - ctx->sse[1].v[0] + 4 * ctx->sse[2].v[1] -
+	    3 * ctx->sse[1].v[1];
+	D = 8 * ctx->sse[3].v[0] - 4 * ctx->sse[2].v[0] + 8 * ctx->sse[3].v[1] -
+	    8 * ctx->sse[2].v[1] + ctx->sse[1].v[1];
 
 	ZIO_SET_CHECKSUM(zcp, A, B, C, D);
 }
 
+#define	FLETCHER_4_SSE_RESTORE_CTX(ctx)					\
+{									\
+	asm volatile("movdqu %0, %%xmm0" :: "m" ((ctx)->sse[0]));	\
+	asm volatile("movdqu %0, %%xmm1" :: "m" ((ctx)->sse[1]));	\
+	asm volatile("movdqu %0, %%xmm2" :: "m" ((ctx)->sse[2]));	\
+	asm volatile("movdqu %0, %%xmm3" :: "m" ((ctx)->sse[3]));	\
+}
+
+#define	FLETCHER_4_SSE_SAVE_CTX(ctx)					\
+{									\
+	asm volatile("movdqu %%xmm0, %0" : "=m" ((ctx)->sse[0]));	\
+	asm volatile("movdqu %%xmm1, %0" : "=m" ((ctx)->sse[1]));	\
+	asm volatile("movdqu %%xmm2, %0" : "=m" ((ctx)->sse[2]));	\
+	asm volatile("movdqu %%xmm3, %0" : "=m" ((ctx)->sse[3]));	\
+}
+
 static void
-fletcher_4_sse2(const void *buf, uint64_t size, zio_cksum_t *unused)
+fletcher_4_sse2_native(fletcher_4_ctx_t *ctx, const void *buf, uint64_t size)
 {
 	const uint64_t *ip = buf;
 	const uint64_t *ipend = (uint64_t *)((uint8_t *)ip + size);
+
+	kfpu_begin();
+
+	FLETCHER_4_SSE_RESTORE_CTX(ctx);
 
 	asm volatile("pxor %xmm4, %xmm4");
 
@@ -118,27 +122,37 @@ fletcher_4_sse2(const void *buf, uint64_t size, zio_cksum_t *unused)
 		asm volatile("paddq %xmm1, %xmm2");
 		asm volatile("paddq %xmm2, %xmm3");
 	}
+
+	FLETCHER_4_SSE_SAVE_CTX(ctx);
+
+	kfpu_end();
 }
 
 static void
-fletcher_4_sse2_byteswap(const void *buf, uint64_t size, zio_cksum_t *unused)
+fletcher_4_sse2_byteswap(fletcher_4_ctx_t *ctx, const void *buf, uint64_t size)
 {
 	const uint32_t *ip = buf;
 	const uint32_t *ipend = (uint32_t *)((uint8_t *)ip + size);
 
-	for (; ip < ipend; ip += 2) {
-		uint32_t scratch;
+	kfpu_begin();
 
-		asm volatile("bswapl %0" : "=r"(scratch) : "0"(*ip));
-		asm volatile("movd %0, %%xmm5" :: "r"(scratch));
-		asm volatile("bswapl %0" : "=r"(scratch) : "0"(*(ip + 1)));
-		asm volatile("movd %0, %%xmm6" :: "r"(scratch));
+	FLETCHER_4_SSE_RESTORE_CTX(ctx);
+
+	for (; ip < ipend; ip += 2) {
+		uint32_t scratch1 = BSWAP_32(ip[0]);
+		uint32_t scratch2 = BSWAP_32(ip[1]);
+		asm volatile("movd %0, %%xmm5" :: "r"(scratch1));
+		asm volatile("movd %0, %%xmm6" :: "r"(scratch2));
 		asm volatile("punpcklqdq %xmm6, %xmm5");
 		asm volatile("paddq %xmm5, %xmm0");
 		asm volatile("paddq %xmm0, %xmm1");
 		asm volatile("paddq %xmm1, %xmm2");
 		asm volatile("paddq %xmm2, %xmm3");
 	}
+
+	FLETCHER_4_SSE_SAVE_CTX(ctx);
+
+	kfpu_end();
 }
 
 static boolean_t fletcher_4_sse2_valid(void)
@@ -147,9 +161,11 @@ static boolean_t fletcher_4_sse2_valid(void)
 }
 
 const fletcher_4_ops_t fletcher_4_sse2_ops = {
-	.init = fletcher_4_sse2_init,
-	.fini = fletcher_4_sse2_fini,
-	.compute = fletcher_4_sse2,
+	.init_native = fletcher_4_sse2_init,
+	.fini_native = fletcher_4_sse2_fini,
+	.compute_native = fletcher_4_sse2_native,
+	.init_byteswap = fletcher_4_sse2_init,
+	.fini_byteswap = fletcher_4_sse2_fini,
 	.compute_byteswap = fletcher_4_sse2_byteswap,
 	.valid = fletcher_4_sse2_valid,
 	.name = "sse2"
@@ -159,14 +175,18 @@ const fletcher_4_ops_t fletcher_4_sse2_ops = {
 
 #if defined(HAVE_SSE2) && defined(HAVE_SSSE3)
 static void
-fletcher_4_ssse3_byteswap(const void *buf, uint64_t size, zio_cksum_t *unused)
+fletcher_4_ssse3_byteswap(fletcher_4_ctx_t *ctx, const void *buf, uint64_t size)
 {
-	static const struct zfs_fletcher_sse_array mask = {
+	static const zfs_fletcher_sse_t mask = {
 		.v = { 0x0405060700010203, 0x0C0D0E0F08090A0B }
 	};
 
 	const uint64_t *ip = buf;
 	const uint64_t *ipend = (uint64_t *)((uint8_t *)ip + size);
+
+	kfpu_begin();
+
+	FLETCHER_4_SSE_RESTORE_CTX(ctx);
 
 	asm volatile("movdqu %0, %%xmm7"::"m" (mask));
 	asm volatile("pxor %xmm4, %xmm4");
@@ -186,6 +206,10 @@ fletcher_4_ssse3_byteswap(const void *buf, uint64_t size, zio_cksum_t *unused)
 		asm volatile("paddq %xmm1, %xmm2");
 		asm volatile("paddq %xmm2, %xmm3");
 	}
+
+	FLETCHER_4_SSE_SAVE_CTX(ctx);
+
+	kfpu_end();
 }
 
 static boolean_t fletcher_4_ssse3_valid(void)
@@ -194,9 +218,11 @@ static boolean_t fletcher_4_ssse3_valid(void)
 }
 
 const fletcher_4_ops_t fletcher_4_ssse3_ops = {
-	.init = fletcher_4_sse2_init,
-	.fini = fletcher_4_sse2_fini,
-	.compute = fletcher_4_sse2,
+	.init_native = fletcher_4_sse2_init,
+	.fini_native = fletcher_4_sse2_fini,
+	.compute_native = fletcher_4_sse2_native,
+	.init_byteswap = fletcher_4_sse2_init,
+	.fini_byteswap = fletcher_4_sse2_fini,
 	.compute_byteswap = fletcher_4_ssse3_byteswap,
 	.valid = fletcher_4_ssse3_valid,
 	.name = "ssse3"

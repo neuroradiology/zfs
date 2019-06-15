@@ -48,16 +48,16 @@ zpl_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 	pathname_t *ppn = NULL;
 	pathname_t pn;
 	int zfs_flags = 0;
-	zfs_sb_t *zsb = dentry->d_sb->s_fs_info;
+	zfsvfs_t *zfsvfs = dentry->d_sb->s_fs_info;
 
-	if (dlen(dentry) > ZFS_MAX_DATASET_NAME_LEN)
+	if (dlen(dentry) >= ZAP_MAXNAMELEN)
 		return (ERR_PTR(-ENAMETOOLONG));
 
 	crhold(cr);
 	cookie = spl_fstrans_mark();
 
 	/* If we are a case insensitive fs, we need the real name */
-	if (zsb->z_case == ZFS_CASE_INSENSITIVE) {
+	if (zfsvfs->z_case == ZFS_CASE_INSENSITIVE) {
 		zfs_flags = FIGNORECASE;
 		pn_alloc(&pn);
 		ppn = &pn;
@@ -101,9 +101,13 @@ zpl_lookup(struct inode *dir, struct dentry *dentry, unsigned int flags)
 		struct dentry *new_dentry;
 		struct qstr ci_name;
 
-		ci_name.name = pn.pn_buf;
-		ci_name.len = strlen(pn.pn_buf);
-		new_dentry = d_add_ci(dentry, ip, &ci_name);
+		if (strcmp(dname(dentry), pn.pn_buf) == 0) {
+			new_dentry = d_splice_alias(ip,  dentry);
+		} else {
+			ci_name.name = pn.pn_buf;
+			ci_name.len = strlen(pn.pn_buf);
+			new_dentry = d_add_ci(dentry, ip, &ci_name);
+		}
 		pn_free(ppn);
 		return (new_dentry);
 	} else {
@@ -210,13 +214,52 @@ zpl_mknod(struct inode *dir, struct dentry *dentry, zpl_umode_t mode,
 	return (error);
 }
 
+#ifdef HAVE_TMPFILE
+static int
+zpl_tmpfile(struct inode *dir, struct dentry *dentry, zpl_umode_t mode)
+{
+	cred_t *cr = CRED();
+	struct inode *ip;
+	vattr_t *vap;
+	int error;
+	fstrans_cookie_t cookie;
+
+	crhold(cr);
+	vap = kmem_zalloc(sizeof (vattr_t), KM_SLEEP);
+	zpl_vap_init(vap, dir, mode, cr);
+
+	cookie = spl_fstrans_mark();
+	error = -zfs_tmpfile(dir, vap, 0, mode, &ip, cr, 0, NULL);
+	if (error == 0) {
+		/* d_tmpfile will do drop_nlink, so we should set it first */
+		set_nlink(ip, 1);
+		d_tmpfile(dentry, ip);
+
+		error = zpl_xattr_security_init(ip, dir, &dentry->d_name);
+		if (error == 0)
+			error = zpl_init_acl(ip, dir);
+		/*
+		 * don't need to handle error here, file is already in
+		 * unlinked set.
+		 */
+	}
+
+	spl_fstrans_unmark(cookie);
+	kmem_free(vap, sizeof (vattr_t));
+	crfree(cr);
+	ASSERT3S(error, <=, 0);
+
+	return (error);
+}
+#endif
+
 static int
 zpl_unlink(struct inode *dir, struct dentry *dentry)
 {
 	cred_t *cr = CRED();
 	int error;
 	fstrans_cookie_t cookie;
-	zfs_sb_t *zsb = dentry->d_sb->s_fs_info;
+	zfsvfs_t *zfsvfs = dentry->d_sb->s_fs_info;
 
 	crhold(cr);
 	cookie = spl_fstrans_mark();
@@ -226,7 +269,7 @@ zpl_unlink(struct inode *dir, struct dentry *dentry)
 	 * For a CI FS we must invalidate the dentry to prevent the
 	 * creation of negative entries.
 	 */
-	if (error == 0 && zsb->z_case == ZFS_CASE_INSENSITIVE)
+	if (error == 0 && zfsvfs->z_case == ZFS_CASE_INSENSITIVE)
 		d_invalidate(dentry);
 
 	spl_fstrans_unmark(cookie);
@@ -271,12 +314,12 @@ zpl_mkdir(struct inode *dir, struct dentry *dentry, zpl_umode_t mode)
 }
 
 static int
-zpl_rmdir(struct inode * dir, struct dentry *dentry)
+zpl_rmdir(struct inode *dir, struct dentry *dentry)
 {
 	cred_t *cr = CRED();
 	int error;
 	fstrans_cookie_t cookie;
-	zfs_sb_t *zsb = dentry->d_sb->s_fs_info;
+	zfsvfs_t *zfsvfs = dentry->d_sb->s_fs_info;
 
 	crhold(cr);
 	cookie = spl_fstrans_mark();
@@ -286,7 +329,7 @@ zpl_rmdir(struct inode * dir, struct dentry *dentry)
 	 * For a CI FS we must invalidate the dentry to prevent the
 	 * creation of negative entries.
 	 */
-	if (error == 0 && zsb->z_case == ZFS_CASE_INSENSITIVE)
+	if (error == 0 && zfsvfs->z_case == ZFS_CASE_INSENSITIVE)
 		d_invalidate(dentry);
 
 	spl_fstrans_unmark(cookie);
@@ -297,18 +340,25 @@ zpl_rmdir(struct inode * dir, struct dentry *dentry)
 }
 
 static int
-zpl_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
+zpl_getattr_impl(const struct path *path, struct kstat *stat, u32 request_mask,
+    unsigned int query_flags)
 {
 	int error;
 	fstrans_cookie_t cookie;
 
 	cookie = spl_fstrans_mark();
-	error = -zfs_getattr_fast(dentry->d_inode, stat);
+
+	/*
+	 * XXX request_mask and query_flags currently ignored.
+	 */
+
+	error = -zfs_getattr_fast(path->dentry->d_inode, stat);
 	spl_fstrans_unmark(cookie);
 	ASSERT3S(error, <=, 0);
 
 	return (error);
 }
+ZPL_GETATTR_WRAPPER(zpl_getattr);
 
 static int
 zpl_setattr(struct dentry *dentry, struct iattr *ia)
@@ -319,7 +369,7 @@ zpl_setattr(struct dentry *dentry, struct iattr *ia)
 	int error;
 	fstrans_cookie_t cookie;
 
-	error = inode_change_ok(ip, ia);
+	error = setattr_prepare(dentry, ia);
 	if (error)
 		return (error);
 
@@ -334,8 +384,10 @@ zpl_setattr(struct dentry *dentry, struct iattr *ia)
 	vap->va_mtime = ia->ia_mtime;
 	vap->va_ctime = ia->ia_ctime;
 
-	if (vap->va_mask & ATTR_ATIME)
-		ip->i_atime = ia->ia_atime;
+	if (vap->va_mask & ATTR_ATIME) {
+		ip->i_atime = zpl_inode_timespec_trunc(ia->ia_atime,
+		    ip->i_sb->s_time_gran);
+	}
 
 	cookie = spl_fstrans_mark();
 	error = -zfs_setattr(ip, vap, 0, cr);
@@ -351,12 +403,16 @@ zpl_setattr(struct dentry *dentry, struct iattr *ia)
 }
 
 static int
-zpl_rename(struct inode *sdip, struct dentry *sdentry,
-    struct inode *tdip, struct dentry *tdentry)
+zpl_rename2(struct inode *sdip, struct dentry *sdentry,
+    struct inode *tdip, struct dentry *tdentry, unsigned int flags)
 {
 	cred_t *cr = CRED();
 	int error;
 	fstrans_cookie_t cookie;
+
+	/* We don't have renameat2(2) support */
+	if (flags)
+		return (-EINVAL);
 
 	crhold(cr);
 	cookie = spl_fstrans_mark();
@@ -367,6 +423,15 @@ zpl_rename(struct inode *sdip, struct dentry *sdentry,
 
 	return (error);
 }
+
+#ifndef HAVE_RENAME_WANTS_FLAGS
+static int
+zpl_rename(struct inode *sdip, struct dentry *sdentry,
+    struct inode *tdip, struct dentry *tdentry)
+{
+	return (zpl_rename2(sdip, sdentry, tdip, tdentry, 0));
+}
+#endif
 
 static int
 zpl_symlink(struct inode *dir, struct dentry *dentry, const char *name)
@@ -428,7 +493,7 @@ zpl_get_link_common(struct dentry *dentry, struct inode *ip, char **link)
 	fstrans_cookie_t cookie;
 	cred_t *cr = CRED();
 	struct iovec iov;
-	uio_t uio;
+	uio_t uio = { { 0 }, 0 };
 	int error;
 
 	crhold(cr);
@@ -438,9 +503,8 @@ zpl_get_link_common(struct dentry *dentry, struct inode *ip, char **link)
 
 	uio.uio_iov = &iov;
 	uio.uio_iovcnt = 1;
-	uio.uio_skip = 0;
-	uio.uio_resid = (MAXPATHLEN - 1);
 	uio.uio_segflg = UIO_SYSSPACE;
+	uio.uio_resid = (MAXPATHLEN - 1);
 
 	cookie = spl_fstrans_mark();
 	error = -zfs_readlink(ip, &uio, cr);
@@ -532,7 +596,7 @@ zpl_link(struct dentry *old_dentry, struct inode *dir, struct dentry *dentry)
 		return (-EMLINK);
 
 	crhold(cr);
-	ip->i_ctime = CURRENT_TIME_SEC;
+	ip->i_ctime = current_time(ip);
 	igrab(ip); /* Use ihold() if available */
 
 	cookie = spl_fstrans_mark();
@@ -571,7 +635,7 @@ zpl_truncate_range(struct inode *ip, loff_t start, loff_t end)
 	crhold(cr);
 
 	bf.l_type = F_WRLCK;
-	bf.l_whence = 0;
+	bf.l_whence = SEEK_SET;
 	bf.l_start = start;
 	bf.l_len = end - start;
 	bf.l_pid = 0;
@@ -600,7 +664,8 @@ zpl_revalidate(struct dentry *dentry, struct nameidata *nd)
 zpl_revalidate(struct dentry *dentry, unsigned int flags)
 {
 #endif /* HAVE_D_REVALIDATE_NAMEIDATA */
-	zfs_sb_t *zsb = dentry->d_sb->s_fs_info;
+	/* CSTYLED */
+	zfsvfs_t *zfsvfs = dentry->d_sb->s_fs_info;
 	int error;
 
 	if (flags & LOOKUP_RCU)
@@ -610,12 +675,12 @@ zpl_revalidate(struct dentry *dentry, unsigned int flags)
 	 * Automounted snapshots rely on periodic dentry revalidation
 	 * to defer snapshots from being automatically unmounted.
 	 */
-	if (zsb->z_issnap) {
-		if (time_after(jiffies, zsb->z_snap_defer_time +
+	if (zfsvfs->z_issnap) {
+		if (time_after(jiffies, zfsvfs->z_snap_defer_time +
 		    MAX(zfs_expire_snapshot * HZ / 2, HZ))) {
-			zsb->z_snap_defer_time = jiffies;
-			zfsctl_snapshot_unmount_delay(zsb->z_os->os_spa,
-			    dmu_objset_id(zsb->z_os), zfs_expire_snapshot);
+			zfsvfs->z_snap_defer_time = jiffies;
+			zfsctl_snapshot_unmount_delay(zfsvfs->z_os->os_spa,
+			    dmu_objset_id(zfsvfs->z_os), zfs_expire_snapshot);
 		}
 	}
 
@@ -626,7 +691,7 @@ zpl_revalidate(struct dentry *dentry, unsigned int flags)
 	 */
 	if (dentry->d_inode == NULL) {
 		spin_lock(&dentry->d_lock);
-		error = time_before(dentry->d_time, zsb->z_rollback_time);
+		error = time_before(dentry->d_time, zfsvfs->z_rollback_time);
 		spin_unlock(&dentry->d_lock);
 
 		if (error)
@@ -644,19 +709,13 @@ zpl_revalidate(struct dentry *dentry, unsigned int flags)
 }
 
 const struct inode_operations zpl_inode_operations = {
-	.create		= zpl_create,
-	.link		= zpl_link,
-	.unlink		= zpl_unlink,
-	.symlink	= zpl_symlink,
-	.mkdir		= zpl_mkdir,
-	.rmdir		= zpl_rmdir,
-	.mknod		= zpl_mknod,
-	.rename		= zpl_rename,
 	.setattr	= zpl_setattr,
 	.getattr	= zpl_getattr,
+#ifdef HAVE_GENERIC_SETXATTR
 	.setxattr	= generic_setxattr,
 	.getxattr	= generic_getxattr,
 	.removexattr	= generic_removexattr,
+#endif
 	.listxattr	= zpl_xattr_list,
 #ifdef HAVE_INODE_TRUNCATE_RANGE
 	.truncate_range = zpl_truncate_range,
@@ -665,6 +724,9 @@ const struct inode_operations zpl_inode_operations = {
 	.fallocate	= zpl_fallocate,
 #endif /* HAVE_INODE_FALLOCATE */
 #if defined(CONFIG_FS_POSIX_ACL)
+#if defined(HAVE_SET_ACL)
+	.set_acl	= zpl_set_acl,
+#endif
 #if defined(HAVE_GET_ACL)
 	.get_acl	= zpl_get_acl,
 #elif defined(HAVE_CHECK_ACL)
@@ -684,14 +746,26 @@ const struct inode_operations zpl_dir_inode_operations = {
 	.mkdir		= zpl_mkdir,
 	.rmdir		= zpl_rmdir,
 	.mknod		= zpl_mknod,
+#ifdef HAVE_RENAME_WANTS_FLAGS
+	.rename		= zpl_rename2,
+#else
 	.rename		= zpl_rename,
+#endif
+#ifdef HAVE_TMPFILE
+	.tmpfile	= zpl_tmpfile,
+#endif
 	.setattr	= zpl_setattr,
 	.getattr	= zpl_getattr,
+#ifdef HAVE_GENERIC_SETXATTR
 	.setxattr	= generic_setxattr,
 	.getxattr	= generic_getxattr,
 	.removexattr	= generic_removexattr,
+#endif
 	.listxattr	= zpl_xattr_list,
 #if defined(CONFIG_FS_POSIX_ACL)
+#if defined(HAVE_SET_ACL)
+	.set_acl	= zpl_set_acl,
+#endif
 #if defined(HAVE_GET_ACL)
 	.get_acl	= zpl_get_acl,
 #elif defined(HAVE_CHECK_ACL)
@@ -703,7 +777,9 @@ const struct inode_operations zpl_dir_inode_operations = {
 };
 
 const struct inode_operations zpl_symlink_inode_operations = {
+#ifdef HAVE_GENERIC_READLINK
 	.readlink	= generic_readlink,
+#endif
 #if defined(HAVE_GET_LINK_DELAYED) || defined(HAVE_GET_LINK_COOKIE)
 	.get_link	= zpl_get_link,
 #elif defined(HAVE_FOLLOW_LINK_COOKIE) || defined(HAVE_FOLLOW_LINK_NAMEIDATA)
@@ -714,20 +790,27 @@ const struct inode_operations zpl_symlink_inode_operations = {
 #endif
 	.setattr	= zpl_setattr,
 	.getattr	= zpl_getattr,
+#ifdef HAVE_GENERIC_SETXATTR
 	.setxattr	= generic_setxattr,
 	.getxattr	= generic_getxattr,
 	.removexattr	= generic_removexattr,
+#endif
 	.listxattr	= zpl_xattr_list,
 };
 
 const struct inode_operations zpl_special_inode_operations = {
 	.setattr	= zpl_setattr,
 	.getattr	= zpl_getattr,
+#ifdef HAVE_GENERIC_SETXATTR
 	.setxattr	= generic_setxattr,
 	.getxattr	= generic_getxattr,
 	.removexattr	= generic_removexattr,
+#endif
 	.listxattr	= zpl_xattr_list,
 #if defined(CONFIG_FS_POSIX_ACL)
+#if defined(HAVE_SET_ACL)
+	.set_acl	= zpl_set_acl,
+#endif
 #if defined(HAVE_GET_ACL)
 	.get_acl	= zpl_get_acl,
 #elif defined(HAVE_CHECK_ACL)

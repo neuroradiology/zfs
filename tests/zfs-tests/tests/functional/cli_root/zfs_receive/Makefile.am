@@ -13,4 +13,13 @@ dist_pkgdata_SCRIPTS = \
 	zfs_receive_009_neg.ksh \
 	zfs_receive_010_pos.ksh \
 	zfs_receive_011_pos.ksh \
-	zfs_receive_012_pos.ksh
+	zfs_receive_012_pos.ksh \
+	zfs_receive_013_pos.ksh \
+	zfs_receive_014_pos.ksh \
+	zfs_receive_015_pos.ksh \
+	receive-o-x_props_override.ksh \
+	zfs_receive_from_encrypted.ksh \
+	zfs_receive_to_encrypted.ksh \
+	zfs_receive_raw.ksh \
+	zfs_receive_raw_incremental.ksh \
+	zfs_receive_-e.ksh

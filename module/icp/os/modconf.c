@@ -36,7 +36,9 @@ static int mod_infonull(void *, struct modlinkage *, int *);
  * Cryptographic Modules
  */
 struct mod_ops mod_cryptoops = {
-	mod_null, mod_null, mod_infonull
+	.modm_install = mod_null,
+	.modm_remove = mod_null,
+	.modm_info = mod_infonull
 };
 
 /*
@@ -71,7 +73,7 @@ mod_install(struct modlinkage *modlp)
 
 	if (modlp->ml_rev != MODREV_1) {
 		cmn_err(CE_WARN, "mod_install: "
-			"modlinkage structure is not MODREV_1\n");
+		    "modlinkage structure is not MODREV_1\n");
 		return (EINVAL);
 	}
 	linkpp = (struct modlmisc **)&modlp->ml_linkage[0];
@@ -146,7 +148,7 @@ mod_info(struct modlinkage *modlp, struct modinfo *modinfop)
 		if (*linkpp == NULL) {
 			msip->msi_linkinfo[0] = '\0';
 		} else {
-			(void) strncpy(msip->msi_linkinfo,
+			(void) strlcpy(msip->msi_linkinfo,
 			    (*linkpp)->misc_linkinfo, MODMAXLINKINFOLEN);
 			retval = MODL_INFO(*linkpp, modlp, &msip->msi_p0);
 			if (retval != 0)

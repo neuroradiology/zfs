@@ -32,6 +32,7 @@
 
 int taskq_now;
 taskq_t *system_taskq;
+taskq_t *system_delay_taskq;
 
 #define	TASKQ_ACTIVE	0x00010000
 
@@ -245,7 +246,7 @@ taskq_thread(void *arg)
 /*ARGSUSED*/
 taskq_t *
 taskq_create(const char *name, int nthreads, pri_t pri,
-	int minalloc, int maxalloc, uint_t flags)
+    int minalloc, int maxalloc, uint_t flags)
 {
 	taskq_t *tq = kmem_zalloc(sizeof (taskq_t), KM_SLEEP);
 	int t;
@@ -268,7 +269,7 @@ taskq_create(const char *name, int nthreads, pri_t pri,
 	cv_init(&tq->tq_dispatch_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&tq->tq_wait_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&tq->tq_maxalloc_cv, NULL, CV_DEFAULT, NULL);
-	(void) strncpy(tq->tq_name, name, TASKQ_NAMELEN + 1);
+	(void) strncpy(tq->tq_name, name, TASKQ_NAMELEN);
 	tq->tq_flags = flags | TASKQ_ACTIVE;
 	tq->tq_active = nthreads;
 	tq->tq_nthreads = nthreads;
@@ -353,6 +354,8 @@ system_taskq_init(void)
 {
 	system_taskq = taskq_create("system_taskq", 64, maxclsyspri, 4, 512,
 	    TASKQ_DYNAMIC | TASKQ_PREPOPULATE);
+	system_delay_taskq = taskq_create("delay_taskq", 4, maxclsyspri, 4,
+	    512, TASKQ_DYNAMIC | TASKQ_PREPOPULATE);
 }
 
 void
@@ -360,4 +363,6 @@ system_taskq_fini(void)
 {
 	taskq_destroy(system_taskq);
 	system_taskq = NULL; /* defensive */
+	taskq_destroy(system_delay_taskq);
+	system_delay_taskq = NULL;
 }

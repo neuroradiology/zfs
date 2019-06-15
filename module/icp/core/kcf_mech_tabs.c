@@ -100,7 +100,7 @@ kcf_mech_entry_tab_t kcf_mech_tabs_tab[KCF_LAST_OPSCLASS + 1] = {
 };
 
 /*
- * Per-algorithm internal threasholds for the minimum input size of before
+ * Per-algorithm internal thresholds for the minimum input size of before
  * offloading to hardware provider.
  * Dispatching a crypto operation  to a hardware provider entails paying the
  * cost of an additional context switch.  Measurments with Sun Accelerator 4000
@@ -140,7 +140,21 @@ kcf_mech_hash_find(char *mechname)
 void
 kcf_destroy_mech_tabs(void)
 {
-	if (kcf_mech_hash) mod_hash_destroy_hash(kcf_mech_hash);
+	int i, max;
+	kcf_ops_class_t class;
+	kcf_mech_entry_t *me_tab;
+
+	if (kcf_mech_hash)
+		mod_hash_destroy_hash(kcf_mech_hash);
+
+	mutex_destroy(&kcf_mech_tabs_lock);
+
+	for (class = KCF_FIRST_OPSCLASS; class <= KCF_LAST_OPSCLASS; class++) {
+		max = kcf_mech_tabs_tab[class].met_size;
+		me_tab = kcf_mech_tabs_tab[class].met_tab;
+		for (i = 0; i < max; i++)
+			mutex_destroy(&(me_tab[i].me_mutex));
+	}
 }
 
 /*
@@ -307,7 +321,7 @@ kcf_create_mech_entry(kcf_ops_class_t class, char *mechname)
 		mutex_enter(&(me_tab[i].me_mutex));
 		if (me_tab[i].me_name[0] == 0) {
 			/* Found an empty spot */
-			(void) strncpy(me_tab[i].me_name, mechname,
+			(void) strlcpy(me_tab[i].me_name, mechname,
 			    CRYPTO_MAX_MECH_NAME);
 			me_tab[i].me_name[CRYPTO_MAX_MECH_NAME-1] = '\0';
 			me_tab[i].me_mechid = KCF_MECHID(class, i);
@@ -659,7 +673,9 @@ kcf_remove_mech_provider(char *mech_name, kcf_provider_desc_t *prov_desc)
 		mech_entry->me_sw_prov = NULL;
 		break;
 	default:
-		break;
+		/* unexpected crypto_provider_type_t */
+		mutex_exit(&mech_entry->me_mutex);
+		return;
 	}
 
 	mutex_exit(&mech_entry->me_mutex);

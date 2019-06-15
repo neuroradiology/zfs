@@ -20,7 +20,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright (c) 2016, Datto, Inc. All rights reserved.
+ * Copyright (c) 2017, Datto, Inc. All rights reserved.
  */
 
 #ifdef _KERNEL
@@ -109,8 +109,10 @@
 void __exit
 icp_fini(void)
 {
+	skein_mod_fini();
 	sha2_mod_fini();
 	sha1_mod_fini();
+	edonr_mod_fini();
 	aes_mod_fini();
 	kcf_sched_destroy();
 	kcf_prov_tab_destroy();
@@ -139,14 +141,18 @@ icp_init(void)
 
 	/* initialize algorithms */
 	aes_mod_init();
+	edonr_mod_init();
 	sha1_mod_init();
 	sha2_mod_init();
+	skein_mod_init();
 
 	return (0);
 }
 
-#if defined(_KERNEL) && defined(HAVE_SPL)
+#if defined(_KERNEL)
 module_exit(icp_fini);
 module_init(icp_init);
-MODULE_LICENSE("CDDL");
+MODULE_AUTHOR(ZFS_META_AUTHOR);
+MODULE_LICENSE(ZFS_META_LICENSE);
+MODULE_VERSION(ZFS_META_VERSION "-" ZFS_META_RELEASE);
 #endif

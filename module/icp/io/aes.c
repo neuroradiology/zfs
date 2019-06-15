@@ -35,6 +35,7 @@
 #include <sys/modctl.h>
 #define	_AES_IMPL
 #include <aes/aes_impl.h>
+#include <modes/gcm_impl.h>
 
 #define	CRYPTO_PROVIDER_NAME "aes"
 
@@ -132,16 +133,16 @@ static int aes_decrypt_atomic(crypto_provider_handle_t, crypto_session_id_t,
     crypto_data_t *, crypto_spi_ctx_template_t, crypto_req_handle_t);
 
 static crypto_cipher_ops_t aes_cipher_ops = {
-	aes_encrypt_init,
-	aes_encrypt,
-	aes_encrypt_update,
-	aes_encrypt_final,
-	aes_encrypt_atomic,
-	aes_decrypt_init,
-	aes_decrypt,
-	aes_decrypt_update,
-	aes_decrypt_final,
-	aes_decrypt_atomic
+	.encrypt_init = aes_encrypt_init,
+	.encrypt = aes_encrypt,
+	.encrypt_update = aes_encrypt_update,
+	.encrypt_final = aes_encrypt_final,
+	.encrypt_atomic = aes_encrypt_atomic,
+	.decrypt_init = aes_decrypt_init,
+	.decrypt = aes_decrypt,
+	.decrypt_update = aes_decrypt_update,
+	.decrypt_final = aes_decrypt_final,
+	.decrypt_atomic = aes_decrypt_atomic
 };
 
 static int aes_mac_atomic(crypto_provider_handle_t, crypto_session_id_t,
@@ -152,12 +153,12 @@ static int aes_mac_verify_atomic(crypto_provider_handle_t, crypto_session_id_t,
     crypto_spi_ctx_template_t, crypto_req_handle_t);
 
 static crypto_mac_ops_t aes_mac_ops = {
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	aes_mac_atomic,
-	aes_mac_verify_atomic
+	.mac_init = NULL,
+	.mac = NULL,
+	.mac_update = NULL,
+	.mac_final = NULL,
+	.mac_atomic = aes_mac_atomic,
+	.mac_verify_atomic = aes_mac_verify_atomic
 };
 
 static int aes_create_ctx_template(crypto_provider_handle_t,
@@ -166,8 +167,8 @@ static int aes_create_ctx_template(crypto_provider_handle_t,
 static int aes_free_context(crypto_ctx_t *);
 
 static crypto_ctx_ops_t aes_ctx_ops = {
-	aes_create_ctx_template,
-	aes_free_context
+	.create_ctx_template = aes_create_ctx_template,
+	.free_context = aes_free_context
 };
 
 static crypto_ops_t aes_crypto_ops = {{{{{
@@ -204,6 +205,10 @@ int
 aes_mod_init(void)
 {
 	int ret;
+
+	/* find fastest implementations and set any requested implementations */
+	aes_impl_init();
+	gcm_impl_init();
 
 	if ((ret = mod_install(&modlinkage)) != 0)
 		return (ret);
@@ -321,14 +326,16 @@ aes_provider_status(crypto_provider_handle_t provider, uint_t *status)
 static int
 aes_encrypt_init(crypto_ctx_t *ctx, crypto_mechanism_t *mechanism,
     crypto_key_t *key, crypto_spi_ctx_template_t template,
-    crypto_req_handle_t req) {
+    crypto_req_handle_t req)
+{
 	return (aes_common_init(ctx, mechanism, key, template, req, B_TRUE));
 }
 
 static int
 aes_decrypt_init(crypto_ctx_t *ctx, crypto_mechanism_t *mechanism,
     crypto_key_t *key, crypto_spi_ctx_template_t template,
-    crypto_req_handle_t req) {
+    crypto_req_handle_t req)
+{
 	return (aes_common_init(ctx, mechanism, key, template, req, B_FALSE));
 }
 
@@ -1282,7 +1289,7 @@ aes_common_init_ctx(aes_ctx_t *aes_ctx, crypto_spi_ctx_template_t *template,
 {
 	int rv = CRYPTO_SUCCESS;
 	void *keysched;
-	size_t size;
+	size_t size = 0;
 
 	if (template == NULL) {
 		if ((keysched = aes_alloc_keysched(&size, kmflag)) == NULL)

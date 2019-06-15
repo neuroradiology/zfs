@@ -23,7 +23,7 @@
  * Use is subject to license terms.
  */
 /*
- * Copyright (c) 2012, 2014 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2017 by Delphix. All rights reserved.
  */
 
 #ifndef _SYS_TXG_H
@@ -60,6 +60,7 @@ typedef struct txg_node {
 typedef struct txg_list {
 	kmutex_t	tl_lock;
 	size_t		tl_offset;
+	spa_t		*tl_spa;
 	txg_node_t	*tl_head[TXG_SIZE];
 } txg_list_t;
 
@@ -89,10 +90,11 @@ extern void txg_wait_synced(struct dsl_pool *dp, uint64_t txg);
 /*
  * Wait until the given transaction group, or one after it, is
  * the open transaction group.  Try to make this happen as soon
- * as possible (eg. kick off any necessary syncs immediately).
- * If txg == 0, wait for the next open txg.
+ * as possible (eg. kick off any necessary syncs immediately) when
+ * should_quiesce is set.  If txg == 0, wait for the next open txg.
  */
-extern void txg_wait_open(struct dsl_pool *dp, uint64_t txg);
+extern void txg_wait_open(struct dsl_pool *dp, uint64_t txg,
+    boolean_t should_quiesce);
 
 /*
  * Returns TRUE if we are "backed up" waiting for the syncing
@@ -102,6 +104,8 @@ extern boolean_t txg_stalled(struct dsl_pool *dp);
 
 /* returns TRUE if someone is waiting for the next txg to sync */
 extern boolean_t txg_sync_waiting(struct dsl_pool *dp);
+
+extern void txg_verify(spa_t *spa, uint64_t txg);
 
 /*
  * Wait for pending commit callbacks of already-synced transactions to finish
@@ -115,7 +119,7 @@ extern void txg_wait_callbacks(struct dsl_pool *dp);
 
 #define	TXG_CLEAN(txg)	((txg) - 1)
 
-extern void txg_list_create(txg_list_t *tl, size_t offset);
+extern void txg_list_create(txg_list_t *tl, spa_t *spa, size_t offset);
 extern void txg_list_destroy(txg_list_t *tl);
 extern boolean_t txg_list_empty(txg_list_t *tl, uint64_t txg);
 extern boolean_t txg_all_lists_empty(txg_list_t *tl);
@@ -129,6 +133,13 @@ extern void *txg_list_next(txg_list_t *tl, void *p, uint64_t txg);
 
 /* Global tuning */
 extern int zfs_txg_timeout;
+
+
+#ifdef ZFS_DEBUG
+#define	TXG_VERIFY(spa, txg)		txg_verify(spa, txg)
+#else
+#define	TXG_VERIFY(spa, txg)
+#endif
 
 #ifdef	__cplusplus
 }

@@ -22,7 +22,8 @@
 /*
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright 2011 Nexenta Systems, Inc. All rights reserved.
- * Copyright (c) 2011, 2015 by Delphix. All rights reserved.
+ * Copyright (c) 2011, 2018 by Delphix. All rights reserved.
+ * Copyright 2017 Joyent, Inc.
  */
 
 #include <sys/spa.h>
@@ -54,7 +55,7 @@
  * configuration information.  When the module loads, we read this information
  * from /etc/zfs/zpool.cache and populate the SPA namespace.  This namespace is
  * maintained independently in spa.c.  Whenever the namespace is modified, or
- * the configuration of a pool is changed, we call spa_config_sync(), which
+ * the configuration of a pool is changed, we call spa_write_cachefile(), which
  * walks through all the active pools and writes the configuration to disk.
  */
 
@@ -92,8 +93,7 @@ spa_config_load(void)
 	 */
 	pathname = kmem_alloc(MAXPATHLEN, KM_SLEEP);
 
-	(void) snprintf(pathname, MAXPATHLEN, "%s%s",
-	    (rootdir != NULL) ? "./" : "", spa_config_path);
+	(void) snprintf(pathname, MAXPATHLEN, "%s", spa_config_path);
 
 	file = kobj_open_file(pathname);
 
@@ -147,6 +147,26 @@ out:
 }
 
 static int
+spa_config_remove(spa_config_dirent_t *dp)
+{
+#if defined(__linux__) && defined(_KERNEL)
+	int error, flags = FWRITE | FTRUNC;
+	uio_seg_t seg = UIO_SYSSPACE;
+	vnode_t *vp;
+
+	error = vn_open(dp->scd_path, seg, flags, 0644, &vp, 0, 0);
+	if (error == 0) {
+		(void) VOP_FSYNC(vp, FSYNC, kcred, NULL);
+		(void) VOP_CLOSE(vp, 0, 1, 0, kcred, NULL);
+	}
+
+	return (error);
+#else
+	return (vn_remove(dp->scd_path, UIO_SYSSPACE, RMFILE));
+#endif
+}
+
+static int
 spa_config_write(spa_config_dirent_t *dp, nvlist_t *nvl)
 {
 	size_t buflen;
@@ -160,7 +180,10 @@ spa_config_write(spa_config_dirent_t *dp, nvlist_t *nvl)
 	 * If the nvlist is empty (NULL), then remove the old cachefile.
 	 */
 	if (nvl == NULL) {
-		err = vn_remove(dp->scd_path, UIO_SYSSPACE, RMFILE);
+		err = spa_config_remove(dp);
+		if (err == ENOENT)
+			err = 0;
+
 		return (err);
 	}
 
@@ -173,9 +196,9 @@ spa_config_write(spa_config_dirent_t *dp, nvlist_t *nvl)
 #if defined(__linux__) && defined(_KERNEL)
 	/*
 	 * Write the configuration to disk.  Due to the complexity involved
-	 * in performing a rename from within the kernel the file is truncated
-	 * and overwritten in place.  In the event of an error the file is
-	 * unlinked to make sure we always have a consistent view of the data.
+	 * in performing a rename and remove from within the kernel the file
+	 * is instead truncated and overwritten in place.  This way we always
+	 * have a consistent view of the data or a zero length file.
 	 */
 	err = vn_open(dp->scd_path, UIO_SYSSPACE, oflags, 0644, &vp, 0, 0);
 	if (err == 0) {
@@ -185,9 +208,8 @@ spa_config_write(spa_config_dirent_t *dp, nvlist_t *nvl)
 			err = VOP_FSYNC(vp, FSYNC, kcred, NULL);
 
 		(void) VOP_CLOSE(vp, oflags, 1, 0, kcred, NULL);
-
 		if (err)
-			(void) vn_remove(dp->scd_path, UIO_SYSSPACE, RMFILE);
+			(void) spa_config_remove(dp);
 	}
 #else
 	/*
@@ -222,11 +244,11 @@ spa_config_write(spa_config_dirent_t *dp, nvlist_t *nvl)
  * the configuration has been synced to the MOS. This exposes a window where
  * the MOS config will have been updated but the cache file has not. If
  * the system were to crash at that instant then the cached config may not
- * contain the correct information to open the pool and an explicity import
+ * contain the correct information to open the pool and an explicit import
  * would be required.
  */
 void
-spa_config_sync(spa_t *target, boolean_t removing, boolean_t postsysevent)
+spa_write_cachefile(spa_t *target, boolean_t removing, boolean_t postsysevent)
 {
 	spa_config_dirent_t *dp, *tdp;
 	nvlist_t *nvl;
@@ -270,6 +292,7 @@ spa_config_sync(spa_t *target, boolean_t removing, boolean_t postsysevent)
 			mutex_enter(&spa->spa_props_lock);
 			tdp = list_head(&spa->spa_config_list);
 			if (spa->spa_config == NULL ||
+			    tdp == NULL ||
 			    tdp->scd_path == NULL ||
 			    strcmp(tdp->scd_path, dp->scd_path) != 0) {
 				mutex_exit(&spa->spa_props_lock);
@@ -303,7 +326,7 @@ spa_config_sync(spa_t *target, boolean_t removing, boolean_t postsysevent)
 		 */
 		if (target->spa_ccw_fail_time == 0) {
 			zfs_ereport_post(FM_EREPORT_ZFS_CONFIG_CACHE_WRITE,
-			    target, NULL, NULL, 0, 0);
+			    target, NULL, NULL, NULL, 0, 0);
 		}
 		target->spa_ccw_fail_time = gethrtime();
 		spa_async_request(target, SPA_ASYNC_CONFIG_UPDATE);
@@ -329,7 +352,7 @@ spa_config_sync(spa_t *target, boolean_t removing, boolean_t postsysevent)
 	spa_config_generation++;
 
 	if (postsysevent)
-		spa_event_notify(target, NULL, FM_EREPORT_ZFS_CONFIG_SYNC);
+		spa_event_notify(target, NULL, NULL, ESC_ZFS_CONFIG_SYNC);
 }
 
 /*
@@ -369,7 +392,8 @@ void
 spa_config_set(spa_t *spa, nvlist_t *config)
 {
 	mutex_enter(&spa->spa_props_lock);
-	nvlist_free(spa->spa_config);
+	if (spa->spa_config != NULL && spa->spa_config != config)
+		nvlist_free(spa->spa_config);
 	spa->spa_config = config;
 	mutex_exit(&spa->spa_props_lock);
 }
@@ -389,7 +413,6 @@ spa_config_generate(spa_t *spa, vdev_t *vd, uint64_t txg, int getstats)
 	boolean_t locked = B_FALSE;
 	uint64_t split_guid;
 	char *pool_name;
-	int config_gen_flags = 0;
 
 	if (vd == NULL) {
 		vd = rvd;
@@ -418,14 +441,14 @@ spa_config_generate(spa_t *spa, vdev_t *vd, uint64_t txg, int getstats)
 	 */
 	if (spa->spa_import_flags & ZFS_IMPORT_TEMP_NAME) {
 		VERIFY0(nvlist_lookup_string(spa->spa_config,
-			ZPOOL_CONFIG_POOL_NAME, &pool_name));
+		    ZPOOL_CONFIG_POOL_NAME, &pool_name));
 	} else
 		pool_name = spa_name(spa);
 
 	config = fnvlist_alloc();
 
 	fnvlist_add_uint64(config, ZPOOL_CONFIG_VERSION, spa_version(spa));
-	fnvlist_add_string(config, ZPOOL_CONFIG_POOL_NAME, spa_name(spa));
+	fnvlist_add_string(config, ZPOOL_CONFIG_POOL_NAME, pool_name);
 	fnvlist_add_uint64(config, ZPOOL_CONFIG_POOL_STATE, spa_state(spa));
 	fnvlist_add_uint64(config, ZPOOL_CONFIG_POOL_TXG, txg);
 	fnvlist_add_uint64(config, ZPOOL_CONFIG_POOL_GUID, spa_guid(spa));
@@ -434,19 +457,12 @@ spa_config_generate(spa_t *spa, vdev_t *vd, uint64_t txg, int getstats)
 		fnvlist_add_string(config, ZPOOL_CONFIG_COMMENT,
 		    spa->spa_comment);
 
-#ifdef	_KERNEL
-	hostid = zone_get_hostid(NULL);
-#else	/* _KERNEL */
-	/*
-	 * We're emulating the system's hostid in userland, so we can't use
-	 * zone_get_hostid().
-	 */
-	(void) ddi_strtoul(hw_serial, NULL, 10, &hostid);
-#endif	/* _KERNEL */
+	hostid = spa_get_hostid();
 	if (hostid != 0)
 		fnvlist_add_uint64(config, ZPOOL_CONFIG_HOSTID, hostid);
 	fnvlist_add_string(config, ZPOOL_CONFIG_HOSTNAME, utsname()->nodename);
 
+	int config_gen_flags = 0;
 	if (vd != rvd) {
 		fnvlist_add_uint64(config, ZPOOL_CONFIG_TOP_GUID,
 		    vd->vdev_top->vdev_guid);
@@ -559,6 +575,18 @@ spa_config_update(spa_t *spa, int what)
 		 */
 		for (c = 0; c < rvd->vdev_children; c++) {
 			vdev_t *tvd = rvd->vdev_child[c];
+
+			/*
+			 * Explicitly skip vdevs that are indirect or
+			 * log vdevs that are being removed. The reason
+			 * is that both of those can have vdev_ms_array
+			 * set to 0 and we wouldn't want to change their
+			 * metaslab size nor call vdev_expand() on them.
+			 */
+			if (!vdev_is_concrete(tvd) ||
+			    (tvd->vdev_islog && tvd->vdev_removing))
+				continue;
+
 			if (tvd->vdev_ms_array == 0)
 				vdev_metaslab_set_size(tvd);
 			vdev_expand(tvd, txg);
@@ -574,15 +602,16 @@ spa_config_update(spa_t *spa, int what)
 	/*
 	 * Update the global config cache to reflect the new mosconfig.
 	 */
-	if (!spa->spa_is_root)
-		spa_config_sync(spa, B_FALSE, what != SPA_CONFIG_UPDATE_POOL);
+	if (!spa->spa_is_root) {
+		spa_write_cachefile(spa, B_FALSE,
+		    what != SPA_CONFIG_UPDATE_POOL);
+	}
 
 	if (what == SPA_CONFIG_UPDATE_POOL)
 		spa_config_update(spa, SPA_CONFIG_UPDATE_VDEVS);
 }
 
-#if defined(_KERNEL) && defined(HAVE_SPL)
-EXPORT_SYMBOL(spa_config_sync);
+#if defined(_KERNEL)
 EXPORT_SYMBOL(spa_config_load);
 EXPORT_SYMBOL(spa_all_configs);
 EXPORT_SYMBOL(spa_config_set);

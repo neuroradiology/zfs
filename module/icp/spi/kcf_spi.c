@@ -111,7 +111,7 @@ int
 crypto_register_provider(crypto_provider_info_t *info,
     crypto_kcf_provider_handle_t *handle)
 {
-	char ks_name[KSTAT_STRLEN];
+	char *ks_name;
 
 	kcf_provider_desc_t *prov_desc = NULL;
 	int ret = CRYPTO_ARGUMENTS_BAD;
@@ -238,12 +238,12 @@ crypto_register_provider(crypto_provider_info_t *info,
 		 * This kstat is deleted, when the provider unregisters.
 		 */
 		if (prov_desc->pd_prov_type == CRYPTO_SW_PROVIDER) {
-			(void) snprintf(ks_name, KSTAT_STRLEN, "%s_%s",
+			ks_name = kmem_asprintf("%s_%s",
 			    "NONAME", "provider_stats");
 		} else {
-			(void) snprintf(ks_name, KSTAT_STRLEN, "%s_%d_%u_%s",
-			    "NONAME", 0,
-			    prov_desc->pd_prov_id, "provider_stats");
+			ks_name = kmem_asprintf("%s_%d_%u_%s",
+			    "NONAME", 0, prov_desc->pd_prov_id,
+			    "provider_stats");
 		}
 
 		prov_desc->pd_kstat = kstat_create("kcf", 0, ks_name, "crypto",
@@ -261,6 +261,7 @@ crypto_register_provider(crypto_provider_info_t *info,
 			prov_desc->pd_kstat->ks_update = kcf_prov_kstat_update;
 			kstat_install(prov_desc->pd_kstat);
 		}
+		strfree(ks_name);
 	}
 
 	if (prov_desc->pd_prov_type == CRYPTO_HW_PROVIDER)
@@ -701,16 +702,13 @@ kcf_prov_kstat_update(kstat_t *ksp, int rw)
 
 	ks_data = ksp->ks_data;
 
-	ks_data->ps_ops_total.value.ui64 =
-		pd->pd_sched_info.ks_ndispatches;
-	ks_data->ps_ops_failed.value.ui64 =
-		pd->pd_sched_info.ks_nfails;
-	ks_data->ps_ops_busy_rval.value.ui64 =
-		pd->pd_sched_info.ks_nbusy_rval;
+	ks_data->ps_ops_total.value.ui64 = pd->pd_sched_info.ks_ndispatches;
+	ks_data->ps_ops_failed.value.ui64 = pd->pd_sched_info.ks_nfails;
+	ks_data->ps_ops_busy_rval.value.ui64 = pd->pd_sched_info.ks_nbusy_rval;
 	ks_data->ps_ops_passed.value.ui64 =
-		pd->pd_sched_info.ks_ndispatches -
-		pd->pd_sched_info.ks_nfails -
-		pd->pd_sched_info.ks_nbusy_rval;
+	    pd->pd_sched_info.ks_ndispatches -
+	    pd->pd_sched_info.ks_nfails -
+	    pd->pd_sched_info.ks_nbusy_rval;
 
 	return (0);
 }
@@ -889,7 +887,7 @@ kcf_do_notify(kcf_provider_desc_t *prov_desc, boolean_t is_added)
 		ec.ec_change = is_added ? CRYPTO_MECH_ADDED :
 		    CRYPTO_MECH_REMOVED;
 		for (i = 0; i < prov_desc->pd_mech_list_count; i++) {
-			(void) strncpy(ec.ec_mech_name,
+			(void) strlcpy(ec.ec_mech_name,
 			    prov_desc->pd_mechanisms[i].cm_mech_name,
 			    CRYPTO_MAX_MECH_NAME);
 			kcf_walk_ntfylist(CRYPTO_EVENT_MECHS_CHANGED, &ec);

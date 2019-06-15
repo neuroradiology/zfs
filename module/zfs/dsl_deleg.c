@@ -393,14 +393,13 @@ typedef struct perm_set {
 static int
 perm_set_compare(const void *arg1, const void *arg2)
 {
-	const perm_set_t *node1 = arg1;
-	const perm_set_t *node2 = arg2;
+	const perm_set_t *node1 = (const perm_set_t *)arg1;
+	const perm_set_t *node2 = (const perm_set_t *)arg2;
 	int val;
 
 	val = strcmp(node1->p_setname, node2->p_setname);
-	if (val == 0)
-		return (0);
-	return (val > 0 ? 1 : -1);
+
+	return (AVL_ISIGN(val));
 }
 
 /*
@@ -769,7 +768,7 @@ dsl_delegation_on(objset_t *os)
 	return (!!spa_delegation(os->os_spa));
 }
 
-#if defined(_KERNEL) && defined(HAVE_SPL)
+#if defined(_KERNEL)
 EXPORT_SYMBOL(dsl_deleg_get);
 EXPORT_SYMBOL(dsl_deleg_set);
 #endif

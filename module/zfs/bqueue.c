@@ -73,7 +73,7 @@ bqueue_enqueue(bqueue_t *q, void *data, uint64_t item_size)
 	mutex_enter(&q->bq_lock);
 	obj2node(q, data)->bqn_size = item_size;
 	while (q->bq_size + item_size > q->bq_maxsize) {
-		cv_wait(&q->bq_add_cv, &q->bq_lock);
+		cv_wait_sig(&q->bq_add_cv, &q->bq_lock);
 	}
 	q->bq_size += item_size;
 	list_insert_tail(&q->bq_list, data);
@@ -87,17 +87,18 @@ bqueue_enqueue(bqueue_t *q, void *data, uint64_t item_size)
 void *
 bqueue_dequeue(bqueue_t *q)
 {
-	void *ret;
+	void *ret = NULL;
 	uint64_t item_size;
 	mutex_enter(&q->bq_lock);
 	while (q->bq_size == 0) {
-		cv_wait(&q->bq_pop_cv, &q->bq_lock);
+		cv_wait_sig(&q->bq_pop_cv, &q->bq_lock);
 	}
 	ret = list_remove_head(&q->bq_list);
+	ASSERT3P(ret, !=, NULL);
 	item_size = obj2node(q, ret)->bqn_size;
 	q->bq_size -= item_size;
-	mutex_exit(&q->bq_lock);
 	cv_signal(&q->bq_add_cv);
+	mutex_exit(&q->bq_lock);
 	return (ret);
 }
 

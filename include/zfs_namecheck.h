@@ -23,7 +23,7 @@
  * Use is subject to license terms.
  */
 /*
- * Copyright (c) 2013 by Delphix. All rights reserved.
+ * Copyright (c) 2013, 2016 by Delphix. All rights reserved.
  */
 
 #ifndef	_ZFS_NAMECHECK_H
@@ -38,18 +38,25 @@ typedef enum {
 	NAME_ERR_EMPTY_COMPONENT,	/* name contains an empty component */
 	NAME_ERR_TRAILING_SLASH,	/* name ends with a slash */
 	NAME_ERR_INVALCHAR,		/* invalid character found */
-	NAME_ERR_MULTIPLE_AT,		/* multiple '@' characters found */
+	NAME_ERR_MULTIPLE_DELIMITERS,	/* multiple '@'/'#' delimiters found */
 	NAME_ERR_NOLETTER,		/* pool doesn't begin with a letter */
 	NAME_ERR_RESERVED,		/* entire name is reserved */
 	NAME_ERR_DISKLIKE,		/* reserved disk name (c[0-9].*) */
 	NAME_ERR_TOOLONG,		/* name is too long */
+	NAME_ERR_SELF_REF,		/* reserved self path name ('.') */
+	NAME_ERR_PARENT_REF,		/* reserved parent path name ('..') */
 	NAME_ERR_NO_AT,			/* permission set is missing '@' */
 } namecheck_err_t;
 
 #define	ZFS_PERMSET_MAXLEN	64
 
+extern int zfs_max_dataset_nesting;
+
+int get_dataset_depth(const char *);
 int pool_namecheck(const char *, namecheck_err_t *, char *);
+int entity_namecheck(const char *, namecheck_err_t *, char *);
 int dataset_namecheck(const char *, namecheck_err_t *, char *);
+int dataset_nestcheck(const char *);
 int mountpoint_namecheck(const char *, namecheck_err_t *);
 int zfs_component_namecheck(const char *, namecheck_err_t *, char *);
 int permset_namecheck(const char *, namecheck_err_t *, char *);

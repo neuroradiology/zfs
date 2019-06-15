@@ -20,6 +20,11 @@
 # CDDL HEADER END
 #
 
+#
+# Copyright (c) 2016 by Lawrence Livermore National Security, LLC.
+# Use is subject to license terms.
+#
+
 . $STF_SUITE/include/libtest.shlib
 
 verify_runnable "both"
@@ -27,7 +32,7 @@ verify_runnable "both"
 function cleanup
 {
         if datasetexists $LDNPOOL ; then
-                log_must $ZPOOL destroy -f $LDNPOOL
+                log_must zpool destroy -f $LDNPOOL
         fi
 }
 
@@ -37,27 +42,27 @@ log_assert "feature correctly switches between enabled and active"
 
 LDNPOOL=ldnpool
 LDNFS=$LDNPOOL/large_dnode
-log_must $MKFILE 64M  $TESTDIR/$LDNPOOL
-log_must $ZPOOL create $LDNPOOL $TESTDIR/$LDNPOOL
+log_must mkfile 64M  $TESTDIR/$LDNPOOL
+log_must zpool create $LDNPOOL $TESTDIR/$LDNPOOL
 
 
-state=$($ZPOOL list -Ho feature@large_dnode $LDNPOOL)
+state=$(zpool list -Ho feature@large_dnode $LDNPOOL)
 if [[ "$state" != "enabled" ]]; then
         log_fail "large_dnode has state $state (expected enabled)"
 fi
 
-log_must $ZFS create -o dnodesize=1k $LDNFS
+log_must zfs create -o dnodesize=1k $LDNFS
 log_must touch /$LDNFS/foo
-log_must $ZFS unmount $LDNFS
+log_must zfs unmount $LDNFS
 
-state=$($ZPOOL list -Ho feature@large_dnode $LDNPOOL)
+state=$(zpool list -Ho feature@large_dnode $LDNPOOL)
 if [[ "$state" != "active" ]]; then
         log_fail "large_dnode has state $state (expected active)"
 fi
 
-log_must $ZFS destroy $LDNFS
+log_must zfs destroy $LDNFS
 
-state=$($ZPOOL list -Ho feature@large_dnode $LDNPOOL)
+state=$(zpool list -Ho feature@large_dnode $LDNPOOL)
 if [[ "$state" != "enabled" ]]; then
         log_fail "large_dnode has state $state (expected enabled)"
 fi

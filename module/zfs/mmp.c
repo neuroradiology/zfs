@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -87,12 +87,12 @@
  *
  *    In this case, a weak guarantee is provided.  Since the host which last had
  *    the pool imported will suspend the pool if no mmp writes land within
- *    fail_intervals * multihost_interval ms, the absense of writes during that
+ *    fail_intervals * multihost_interval ms, the absence of writes during that
  *    time means either the pool is not imported, or it is imported but the pool
  *    is suspended and no further writes will occur.
  *
  *    Note that resuming the suspended pool on the remote host would invalidate
- *    this gurantee, and so it is not allowed.
+ *    this guarantee, and so it is not allowed.
  *
  *    The factor of 2 provides a conservative safety factor and derives from
  *    MMP_IMPORT_SAFETY_FACTOR;
@@ -156,7 +156,7 @@
  * vary with the I/O load and this observed value is the ub_mmp_delay which is
  * stored in the uberblock.  The minimum allowed value is 100 ms.
  */
-ulong_t zfs_multihost_interval = MMP_DEFAULT_INTERVAL;
+uint64_t zfs_multihost_interval = MMP_DEFAULT_INTERVAL;
 
 /*
  * Used to control the duration of the activity test on import.  Smaller values
@@ -186,8 +186,8 @@ uint_t zfs_multihost_import_intervals = MMP_DEFAULT_IMPORT_INTERVALS;
  */
 uint_t zfs_multihost_fail_intervals = MMP_DEFAULT_FAIL_INTERVALS;
 
-char *mmp_tag = "mmp_write_uberblock";
-static void mmp_thread(void *arg);
+static const void *const mmp_tag = "mmp_write_uberblock";
+static __attribute__((noreturn)) void mmp_thread(void *arg);
 
 void
 mmp_init(spa_t *spa)
@@ -198,14 +198,6 @@ mmp_init(spa_t *spa)
 	cv_init(&mmp->mmp_thread_cv, NULL, CV_DEFAULT, NULL);
 	mutex_init(&mmp->mmp_io_lock, NULL, MUTEX_DEFAULT, NULL);
 	mmp->mmp_kstat_id = 1;
-
-	/*
-	 * mmp_write_done() calculates mmp_delay based on prior mmp_delay and
-	 * the elapsed time since the last write.  For the first mmp write,
-	 * there is no "last write", so we start with fake non-zero values.
-	 */
-	mmp->mmp_last_write = gethrtime();
-	mmp->mmp_delay = MSEC2NSEC(MMP_INTERVAL_OK(zfs_multihost_interval));
 }
 
 void
@@ -232,7 +224,6 @@ mmp_thread_exit(mmp_thread_t *mmp, kthread_t **mpp, callb_cpr_t *cpr)
 	*mpp = NULL;
 	cv_broadcast(&mmp->mmp_thread_cv);
 	CALLB_CPR_EXIT(cpr);		/* drops &mmp->mmp_thread_lock */
-	thread_exit();
 }
 
 void
@@ -312,11 +303,22 @@ mmp_next_leaf(spa_t *spa)
 
 	do {
 		leaf = list_next(&spa->spa_leaf_list, leaf);
-		if (leaf == NULL)
+		if (leaf == NULL) {
 			leaf = list_head(&spa->spa_leaf_list);
+			ASSERT3P(leaf, !=, NULL);
+		}
 
-		if (!vdev_writeable(leaf)) {
+		/*
+		 * We skip unwritable, offline, detached, and dRAID spare
+		 * devices as they are either not legal targets or the write
+		 * may fail or not be seen by other hosts.  Skipped dRAID
+		 * spares can never be written so the fail mask is not set.
+		 */
+		if (!vdev_writeable(leaf) || leaf->vdev_offline ||
+		    leaf->vdev_detached) {
 			fail_mask |= MMP_FAIL_NOT_WRITABLE;
+		} else if (leaf->vdev_ops == &vdev_draid_spare_ops) {
+			continue;
 		} else if (leaf->vdev_mmp_pending != 0) {
 			fail_mask |= MMP_FAIL_WRITE_PENDING;
 		} else {
@@ -443,7 +445,7 @@ mmp_write_uberblock(spa_t *spa)
 	uint64_t offset;
 
 	hrtime_t lock_acquire_time = gethrtime();
-	spa_config_enter(spa, SCL_STATE, mmp_tag, RW_READER);
+	spa_config_enter_mmp(spa, SCL_STATE, mmp_tag, RW_READER);
 	lock_acquire_time = gethrtime() - lock_acquire_time;
 	if (lock_acquire_time > (MSEC2NSEC(MMP_MIN_INTERVAL) / 10))
 		zfs_dbgmsg("MMP SCL_STATE acquisition pool '%s' took %llu ns "
@@ -484,8 +486,9 @@ mmp_write_uberblock(spa_t *spa)
 	if (mmp->mmp_skip_error != 0) {
 		mmp->mmp_skip_error = 0;
 		zfs_dbgmsg("MMP write after skipping due to unavailable "
-		    "leaves, pool '%s' gethrtime %llu leaf %#llu",
-		    spa_name(spa), gethrtime(), vd->vdev_guid);
+		    "leaves, pool '%s' gethrtime %llu leaf %llu",
+		    spa_name(spa), (u_longlong_t)gethrtime(),
+		    (u_longlong_t)vd->vdev_guid);
 	}
 
 	if (mmp->mmp_zio_root == NULL)
@@ -514,17 +517,18 @@ mmp_write_uberblock(spa_t *spa)
 
 	zio_t *zio  = zio_null(mmp->mmp_zio_root, spa, NULL, NULL, NULL, flags);
 	abd_t *ub_abd = abd_alloc_for_io(VDEV_UBERBLOCK_SIZE(vd), B_TRUE);
-	abd_zero(ub_abd, VDEV_UBERBLOCK_SIZE(vd));
 	abd_copy_from_buf(ub_abd, ub, sizeof (uberblock_t));
+	abd_zero_off(ub_abd, sizeof (uberblock_t),
+	    VDEV_UBERBLOCK_SIZE(vd) - sizeof (uberblock_t));
 
 	mmp->mmp_seq++;
 	mmp->mmp_kstat_id++;
 	mutex_exit(&mmp->mmp_io_lock);
 
 	offset = VDEV_UBERBLOCK_OFFSET(vd, VDEV_UBERBLOCK_COUNT(vd) -
-	    MMP_BLOCKS_PER_LABEL + spa_get_random(MMP_BLOCKS_PER_LABEL));
+	    MMP_BLOCKS_PER_LABEL + random_in_range(MMP_BLOCKS_PER_LABEL));
 
-	label = spa_get_random(VDEV_LABELS);
+	label = random_in_range(VDEV_LABELS);
 	vdev_label_write(zio, vd, label, ub_abd, offset,
 	    VDEV_UBERBLOCK_SIZE(vd), mmp_write_done, mmp,
 	    flags | ZIO_FLAG_DONT_PROPAGATE);
@@ -535,7 +539,7 @@ mmp_write_uberblock(spa_t *spa)
 	zio_nowait(zio);
 }
 
-static void
+static __attribute__((noreturn)) void
 mmp_thread(void *arg)
 {
 	spa_t *spa = (spa_t *)arg;
@@ -547,15 +551,27 @@ mmp_thread(void *arg)
 	uint32_t mmp_fail_intervals = MMP_FAIL_INTVS_OK(
 	    zfs_multihost_fail_intervals);
 	hrtime_t mmp_fail_ns = mmp_fail_intervals * mmp_interval;
-	boolean_t last_spa_suspended = suspended;
-	boolean_t last_spa_multihost = multihost;
-	uint64_t last_mmp_interval = mmp_interval;
-	uint32_t last_mmp_fail_intervals = mmp_fail_intervals;
-	hrtime_t last_mmp_fail_ns = mmp_fail_ns;
+	boolean_t last_spa_suspended;
+	boolean_t last_spa_multihost;
+	uint64_t last_mmp_interval;
+	uint32_t last_mmp_fail_intervals;
+	hrtime_t last_mmp_fail_ns;
 	callb_cpr_t cpr;
 	int skip_wait = 0;
 
 	mmp_thread_enter(mmp, &cpr);
+
+	/*
+	 * There have been no MMP writes yet.  Setting mmp_last_write here gives
+	 * us one mmp_fail_ns period, which is consistent with the activity
+	 * check duration, to try to land an MMP write before MMP suspends the
+	 * pool (if so configured).
+	 */
+
+	mutex_enter(&mmp->mmp_io_lock);
+	mmp->mmp_last_write = gethrtime();
+	mmp->mmp_delay = MSEC2NSEC(MMP_INTERVAL_OK(zfs_multihost_interval));
+	mutex_exit(&mmp->mmp_io_lock);
 
 	while (!mmp->mmp_thread_exiting) {
 		hrtime_t next_time = gethrtime() +
@@ -604,10 +620,11 @@ mmp_thread(void *arg)
 			    "mmp_interval %llu last_mmp_fail_intervals %u "
 			    "mmp_fail_intervals %u mmp_fail_ns %llu "
 			    "skip_wait %d leaves %d next_time %llu",
-			    spa_name(spa), gethrtime(), last_mmp_interval,
-			    mmp_interval, last_mmp_fail_intervals,
-			    mmp_fail_intervals, mmp_fail_ns, skip_wait, leaves,
-			    next_time);
+			    spa_name(spa), (u_longlong_t)gethrtime(),
+			    (u_longlong_t)last_mmp_interval,
+			    (u_longlong_t)mmp_interval, last_mmp_fail_intervals,
+			    mmp_fail_intervals, (u_longlong_t)mmp_fail_ns,
+			    skip_wait, leaves, (u_longlong_t)next_time);
 		}
 
 		/*
@@ -620,8 +637,9 @@ mmp_thread(void *arg)
 			zfs_dbgmsg("MMP state change pool '%s': gethrtime %llu "
 			    "last_spa_multihost %u multihost %u "
 			    "last_spa_suspended %u suspended %u",
-			    spa_name(spa), last_spa_multihost, multihost,
-			    last_spa_suspended, suspended);
+			    spa_name(spa), (u_longlong_t)gethrtime(),
+			    last_spa_multihost, multihost, last_spa_suspended,
+			    suspended);
 			mutex_enter(&mmp->mmp_io_lock);
 			mmp->mmp_last_write = gethrtime();
 			mmp->mmp_delay = mmp_interval;
@@ -646,12 +664,13 @@ mmp_thread(void *arg)
 		    (gethrtime() - mmp->mmp_last_write) > mmp_fail_ns) {
 			zfs_dbgmsg("MMP suspending pool '%s': gethrtime %llu "
 			    "mmp_last_write %llu mmp_interval %llu "
-			    "mmp_fail_intervals %llu mmp_fail_ns %llu",
+			    "mmp_fail_intervals %llu mmp_fail_ns %llu txg %llu",
 			    spa_name(spa), (u_longlong_t)gethrtime(),
 			    (u_longlong_t)mmp->mmp_last_write,
 			    (u_longlong_t)mmp_interval,
 			    (u_longlong_t)mmp_fail_intervals,
-			    (u_longlong_t)mmp_fail_ns);
+			    (u_longlong_t)mmp_fail_ns,
+			    (u_longlong_t)spa->spa_uberblock.ub_txg);
 			cmn_err(CE_WARN, "MMP writes to pool '%s' have not "
 			    "succeeded in over %llu ms; suspending pool. "
 			    "Hrtime %llu",
@@ -671,18 +690,19 @@ mmp_thread(void *arg)
 		}
 
 		CALLB_CPR_SAFE_BEGIN(&cpr);
-		(void) cv_timedwait_sig_hires(&mmp->mmp_thread_cv,
-		    &mmp->mmp_thread_lock, next_time, USEC2NSEC(1),
+		(void) cv_timedwait_idle_hires(&mmp->mmp_thread_cv,
+		    &mmp->mmp_thread_lock, next_time, USEC2NSEC(100),
 		    CALLOUT_FLAG_ABSOLUTE);
 		CALLB_CPR_SAFE_END(&cpr, &mmp->mmp_thread_lock);
 	}
 
 	/* Outstanding writes are allowed to complete. */
-	if (mmp->mmp_zio_root)
-		zio_wait(mmp->mmp_zio_root);
+	zio_wait(mmp->mmp_zio_root);
 
 	mmp->mmp_zio_root = NULL;
 	mmp_thread_exit(mmp, &mmp->mmp_thread, &cpr);
+
+	thread_exit();
 }
 
 /*
@@ -716,36 +736,12 @@ mmp_signal_all_threads(void)
 	mutex_exit(&spa_namespace_lock);
 }
 
-#if defined(_KERNEL)
-#include <linux/mod_compat.h>
-
-static int
-param_set_multihost_interval(const char *val, zfs_kernel_param_t *kp)
-{
-	int ret;
-
-	ret = param_set_ulong(val, kp);
-	if (ret < 0)
-		return (ret);
-
-	if (spa_mode_global != 0)
-		mmp_signal_all_threads();
-
-	return (ret);
-}
-
-/* BEGIN CSTYLED */
-module_param(zfs_multihost_fail_intervals, uint, 0644);
-MODULE_PARM_DESC(zfs_multihost_fail_intervals,
-	"Max allowed period without a successful mmp write");
-
-module_param_call(zfs_multihost_interval, param_set_multihost_interval,
-    param_get_ulong, &zfs_multihost_interval, 0644);
-MODULE_PARM_DESC(zfs_multihost_interval,
+ZFS_MODULE_PARAM_CALL(zfs_multihost, zfs_multihost_, interval,
+	param_set_multihost_interval, spl_param_get_u64, ZMOD_RW,
 	"Milliseconds between mmp writes to each leaf");
 
-module_param(zfs_multihost_import_intervals, uint, 0644);
-MODULE_PARM_DESC(zfs_multihost_import_intervals,
+ZFS_MODULE_PARAM(zfs_multihost, zfs_multihost_, fail_intervals, UINT, ZMOD_RW,
+	"Max allowed period without a successful mmp write");
+
+ZFS_MODULE_PARAM(zfs_multihost, zfs_multihost_, import_intervals, UINT, ZMOD_RW,
 	"Number of zfs_multihost_interval periods to wait for activity");
-/* END CSTYLED */
-#endif

@@ -7,7 +7,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -34,7 +34,7 @@
 
 # This setup script is moderately complex, as it creates scenarios for all
 # of the tests included in this directory. Usually we'd want each test case
-# to setup/teardown it's own configuration, but this would be time consuming
+# to setup/teardown its own configuration, but this would be time consuming
 # given the nature of these tests. However, as a side-effect, one test
 # leaving the system in an unknown state could impact other test cases.
 

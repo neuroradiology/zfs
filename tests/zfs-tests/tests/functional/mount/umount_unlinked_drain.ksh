@@ -32,7 +32,7 @@
 
 function cleanup
 {
-	log_must set_tunable32 zfs_unlink_suspend_progress $default_unlink_sp
+	log_must set_tunable32 UNLINK_SUSPEND_PROGRESS $default_unlink_sp
 	for fs in $(seq 1 3); do
 		mounted $TESTDIR.$fs || zfs mount $TESTPOOL/$TESTFS.$fs
 		rm -f $TESTDIR.$fs/file-*
@@ -47,8 +47,8 @@ function unlinked_size_is
 	last_usize=0
 	while [[ $iters -le $MAX_ITERS ]]; do
 		kstat_file=$(grep -nrwl /proc/spl/kstat/zfs/$2/objset-0x* -e $3)
-		nunlinks=`cat $kstat_file | grep nunlinks | awk '{print $3}'`
-		nunlinked=`cat $kstat_file | grep nunlinked | awk '{print $3}'`
+		nunlinks=$(awk '/nunlinks/ {print $3}' $kstat_file)
+		nunlinked=$(awk '/nunlinked/ {print $3}' $kstat_file)
 		usize=$(($nunlinks - $nunlinked))
 		if [[ $iters == $MAX_ITERS && $usize == $1 ]]; then
 			return 0
@@ -66,8 +66,7 @@ function unlinked_size_is
 }
 
 
-UNLINK_SP_PARAM=/sys/module/zfs/parameters/zfs_unlink_suspend_progress
-default_unlink_sp=$(get_tunable zfs_unlink_suspend_progress)
+default_unlink_sp=$(get_tunable UNLINK_SUSPEND_PROGRESS)
 
 log_onexit cleanup
 
@@ -89,7 +88,7 @@ for fs in 1 2 3; do
 			log_must xattrtest -f 175 -x 3 -r -k -p $TESTDIR.$fs
 		fi
 
-		log_must set_tunable32 zfs_unlink_suspend_progress 1
+		log_must set_tunable32 UNLINK_SUSPEND_PROGRESS 1
 		log_must unlinked_size_is 0 $TESTPOOL $TESTPOOL/$TESTFS.$fs
 
 		# build up unlinked set
@@ -106,7 +105,7 @@ for fs in 1 2 3; do
 		log_must unlinked_size_is 100 $TESTPOOL $TESTPOOL/$TESTFS.$fs
 
 		# confirm we can drain and add to unlinked set at the same time
-		log_must set_tunable32 zfs_unlink_suspend_progress 0
+		log_must set_tunable32 UNLINK_SUSPEND_PROGRESS 0
 		log_must zfs umount $TESTPOOL/$TESTFS.$fs
 		log_must zfs mount $TESTPOOL/$TESTFS.$fs
 		for fn in $(seq 101 175); do

@@ -7,7 +7,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -39,7 +39,7 @@
 # for a dataset. Unlike quotas however there should be no restrictions
 # on accessing space outside of the limits of the reservation (if the
 # space is available in the pool). Verify that in a filesystem with a
-# reservation set that its possible to create files both within the
+# reservation set that it's possible to create files both within the
 # reserved space and also outside.
 #
 # STRATEGY:

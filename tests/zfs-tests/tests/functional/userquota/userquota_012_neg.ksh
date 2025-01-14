@@ -7,7 +7,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -46,9 +46,7 @@ function cleanup
 {
 	cleanup_quota
 
-	if datasetexists $snap_fs; then
-		log_must zfs destroy $snap_fs
-	fi
+	datasetexists $snap_fs && destroy_dataset $snap_fs
 }
 
 log_onexit cleanup
@@ -56,7 +54,7 @@ log_onexit cleanup
 typeset snap_fs=$QFS@snap
 log_assert "Check  set userquota and groupquota on snapshot"
 
-log_note "Check can not set user|group quuota on snapshot"
+log_note "Check can not set user|group quota on snapshot"
 log_must zfs snapshot $snap_fs
 
 log_mustnot zfs set userquota@$QUSER1=$UQUOTA_SIZE $snap_fs

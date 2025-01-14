@@ -12,7 +12,8 @@
 #
 
 #
-# Copyright (c) 2015 by Delphix. All rights reserved.
+# Copyright (c) 2015, Delphix. All rights reserved.
+# Copyright (c) 2019, Kjeld Schouten-Lebbing. All rights reserved.
 #
 
 . $STF_SUITE/tests/functional/rsend/rsend.kshlib
@@ -35,9 +36,9 @@ log_assert "Verify send -c streams are compressed"
 log_onexit cleanup_pool $POOL2
 
 typeset sendfs=$POOL2/$FS
-typeset megs=128
+typeset megs=64
 
-for prop in $(get_rand_compress_any 6); do
+for prop in "${compress_prop_vals[@]}"; do
 	for compressible in 'yes' 'no'; do
 		log_must zfs create -o compress=$prop $sendfs
 

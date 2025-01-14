@@ -7,7 +7,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -44,10 +44,7 @@
 
 function cleanup
 {
-	if [ -e "$TEMPFILE" ]
-	then
-		rm -f "$TEMPFILE"
-	fi
+	rm -f "$TEMPFILE"
 }
 
 log_onexit cleanup
@@ -55,9 +52,9 @@ log_assert "zfs shows a usage message when run as a user"
 
 TEMPFILE="$TEST_BASE_DIR/zfs_001_neg.$$.txt"
 
-eval "zfs > $TEMPFILE 2>&1"
+zfs > $TEMPFILE 2>&1
 log_must grep "usage: zfs command args" "$TEMPFILE"
 
-log_must eval "awk '{if (length(\$0) > 80) exit 1}' < $TEMPFILE"
+log_must awk 'length($0) > 80 {print; ++err} END {exit err}' $TEMPFILE
 
 log_pass "zfs shows a usage message when run as a user"

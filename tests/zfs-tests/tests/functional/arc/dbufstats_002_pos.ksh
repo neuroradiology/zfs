@@ -7,7 +7,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -56,12 +56,12 @@ log_assert "dbufs move from mru to mfu list"
 log_onexit cleanup
 
 log_must file_write -o create -f "$TESTDIR/file" -b 1048576 -c 1 -d R
-log_must zpool sync
+sync_all_pools
 
-objid=$(stat --format="%i" "$TESTDIR/file")
+objid=$(get_objnum "$TESTDIR/file")
 log_note "Object ID for $TESTDIR/file is $objid"
 
-log_must eval "cat /proc/spl/kstat/zfs/dbufs > $DBUFS_FILE"
+log_must eval "kstat dbufs > $DBUFS_FILE"
 dbuf=$(dbufstat -bxn -i "$DBUFS_FILE" -F "object=$objid" | wc -l)
 mru=$(dbufstat -bxn -i "$DBUFS_FILE" -F "object=$objid,list=1" | wc -l)
 mfu=$(dbufstat -bxn -i "$DBUFS_FILE" -F "object=$objid,list=3" | wc -l)
@@ -70,7 +70,7 @@ verify_ne "0" "$mru" "mru count"
 verify_eq "0" "$mfu" "mfu count"
 
 log_must eval "cat $TESTDIR/file > /dev/null"
-log_must eval "cat /proc/spl/kstat/zfs/dbufs > $DBUFS_FILE"
+log_must eval "kstat dbufs > $DBUFS_FILE"
 dbuf=$(dbufstat -bxn -i "$DBUFS_FILE" -F "object=$objid" | wc -l)
 mru=$(dbufstat -bxn -i "$DBUFS_FILE" -F "object=$objid,list=1" | wc -l)
 mfu=$(dbufstat -bxn -i "$DBUFS_FILE" -F "object=$objid,list=3" | wc -l)

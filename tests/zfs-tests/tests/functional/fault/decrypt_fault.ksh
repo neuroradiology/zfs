@@ -40,6 +40,7 @@ function cleanup
 log_onexit cleanup
 
 default_mirror_setup_noexit $DISK1 $DISK2
+log_must zfs set compression=off $TESTPOOL
 log_must eval "echo 'password' | zfs create -o encryption=on \
 	-o keyformat=passphrase -o keylocation=prompt $TESTPOOL/fs"
 mntpt=$(get_prop mountpoint $TESTPOOL/fs)
@@ -50,6 +51,9 @@ log_must zfs umount $TESTPOOL/fs
 log_must zfs mount $TESTPOOL/fs
 
 log_mustnot eval "cat $mntpt/file1 > /dev/null"
-log_must eval "zpool events $TESTPOOL | grep -q 'authentication'"
+# Events are not supported on FreeBSD
+if ! is_freebsd; then
+	log_must eval "zpool events $TESTPOOL | grep -q 'authentication'"
+fi
 
 log_pass "Injected decryption errors are handled correctly"

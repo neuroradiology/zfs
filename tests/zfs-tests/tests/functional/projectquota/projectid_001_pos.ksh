@@ -7,7 +7,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -38,8 +38,8 @@
 #
 #
 # STRATEGY:
-#	1. Create a regular file and a directroy.
-#	2. Set project ID on both directroy and regular file.
+#	1. Create a regular file and a directory.
+#	2. Set project ID on both directory and regular file.
 #	3. New created subdir or regular file should inherit its parent's
 #	   project ID if its parent has project inherit flag.
 #	4. New created subdir should inherit its parent project's inherit flag.

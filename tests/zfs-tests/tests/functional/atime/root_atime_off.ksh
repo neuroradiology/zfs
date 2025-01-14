@@ -7,7 +7,7 @@
 # You may not use this file except in compliance with the License.
 #
 # You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
-# or http://www.opensolaris.org/os/licensing.
+# or https://opensource.org/licenses/CDDL-1.0.
 # See the License for the specific language governing permissions
 # and limitations under the License.
 #
@@ -53,7 +53,7 @@ log_onexit cleanup
 
 #
 # Create $TESTFILE, snapshot and clone.
-# Same as 002 except that atime applies to root dataset (ZoL#8675).
+# Same as 002 except that atime applies to root dataset (OpenZFS#8675).
 #
 setup_snap_clone
 reset_atime

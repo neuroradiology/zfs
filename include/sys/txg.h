@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -41,6 +41,7 @@ extern "C" {
 #define	TXG_MASK		(TXG_SIZE - 1)	/* mask for size	*/
 #define	TXG_INITIAL		TXG_SIZE	/* initial txg 		*/
 #define	TXG_IDX			(txg & TXG_MASK)
+#define	TXG_UNKNOWN		0
 
 /* Number of txgs worth of frees we defer adding to in-core spacemaps */
 #define	TXG_DEFER_SIZE		2
@@ -77,7 +78,7 @@ extern void txg_register_callbacks(txg_handle_t *txghp, list_t *tx_callbacks);
 
 extern void txg_delay(struct dsl_pool *dp, uint64_t txg, hrtime_t delta,
     hrtime_t resolution);
-extern void txg_kick(struct dsl_pool *dp);
+extern void txg_kick(struct dsl_pool *dp, uint64_t txg);
 
 /*
  * Wait until the given transaction group has finished syncing.
@@ -86,6 +87,11 @@ extern void txg_kick(struct dsl_pool *dp);
  * txg to finish syncing.
  */
 extern void txg_wait_synced(struct dsl_pool *dp, uint64_t txg);
+
+/*
+ * Wait as above. Returns true if the thread was signaled while waiting.
+ */
+extern boolean_t txg_wait_synced_sig(struct dsl_pool *dp, uint64_t txg);
 
 /*
  * Wait until the given transaction group, or one after it, is
@@ -132,7 +138,7 @@ extern void *txg_list_head(txg_list_t *tl, uint64_t txg);
 extern void *txg_list_next(txg_list_t *tl, void *p, uint64_t txg);
 
 /* Global tuning */
-extern int zfs_txg_timeout;
+extern uint_t zfs_txg_timeout;
 
 
 #ifdef ZFS_DEBUG
